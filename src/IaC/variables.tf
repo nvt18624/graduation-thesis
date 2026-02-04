@@ -18,3 +18,13 @@ variable "subnet_2_range" {}
 variable "subnet_2_az" {}
 
 
+//firewall
+variable "firewall_name" {}
+variable "protocol" {}
+variable "ports" {
+  type = list(number)
+}
+variable "source_ranges" {
+  type = list(string)
+}
+
