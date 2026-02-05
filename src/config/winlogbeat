@@ -1,0 +1,207 @@
+# ============================== Winlogbeat - only REAL USER LOGON ==============================
+winlogbeat.event_logs:
+  - name: Security
+    event_id: 4624, 4625, 4648
+    include_xml: false
+
+# ============================== Processors ==============================
+processors:
+
+  - drop_event:
+      when.and:
+        - equals.winlog.event_id: 4624
+        - or:
+            - equals.winlog.event_data.TargetUserName: "SYSTEM"
+            - equals.winlog.event_data.TargetUserName: "LOCAL SERVICE"
+            - equals.winlog.event_data.TargetUserName: "NETWORK SERVICE"
+            - equals.winlog.event_data.TargetUserName: "ANONYMOUS LOGON"
+            - contains.winlog.event_data.TargetUserName: "DWM-"
+            - regexp.winlog.event_data.TargetUserName: ".*\\$$"
+            - contains.winlog.event_data.TargetUserName: "svc"
+            - contains.winlog.event_data.TargetUserName: "SVC"
+            - contains.winlog.event_data.TargetUserName: "service"
+
+  
+  - drop_event:
+      when.or:
+        - equals.winlog.event_data.IpAddress: "127.0.0.1"
+        - equals.winlog.event_data.IpAddress: "::1"
+        - equals.winlog.event_data.IpAddress: "-"
+  
+  
+  - drop_event:
+      when.and:
+        - equals.winlog.event_id: 4624
+        - not.or:
+            - equals.winlog.event_data.LogonType: "3"
+            - equals.winlog.event_data.LogonType: "10"
+  
+
+  - drop_event:
+      when.equals.winlog.event_data.IpPort: "0"
+  
+
+  - drop_event:
+      when.and:
+        - equals.winlog.event_id: 4624
+        - equals.winlog.event_data.AuthenticationPackageName: "Kerberos"
+        - contains.winlog.event_data.LogonProcessName: "Kerberos"
+  - drop_event:
+      when.and:
+        - equals.winlog.event_id: 4624
+        - or:
+            - equals.winlog.event_data.LogonType: "3"
+            - equals.winlog.event_data.LogonType: "10"
+        - or:
+            - contains.winlog.event_data.LogonProcessName: "Kerberos"
+            - contains.winlog.event_data.LogonProcessName: "Advapi"
+            - contains.winlog.event_data.LogonProcessName: "Negotiate"
+
+
+  - add_host_metadata:
+      netinfo.enabled: false
+      cache.ttl: 5m
+  
+  - add_tags:
+      tags: ["windows_auth", "real_user_only"]
+
+  
+  - script:
+      lang: javascript
+      source: >
+        function process(event) {
+          var eventId = event.Get("winlog.event_id");
+          var logonType = event.Get("winlog.event_data.LogonType");
+          var failureReason = event.Get("winlog.event_data.FailureReason");
+          var status = event.Get("winlog.event_data.Status");
+          var subStatus = event.Get("winlog.event_data.SubStatus");
+          var logonProcess = event.Get("winlog.event_data.LogonProcessName");
+          
+          if (eventId == 4624) {
+            event.Put("auth.result", "success");
+            if (logonType == "10") {
+              event.Put("auth.type", "rdp");
+            } else if (logonType == "3") {
+              event.Put("auth.type", "network");
+            }
+          } else if (eventId == 4625) {
+            event.Put("auth.result", "failed");
+            event.Put("auth.type", logonType == "10" ? "rdp" : (logonType == "3" ? "network" : "other"));
+            
+            if (failureReason) event.Put("auth.failure_reason", failureReason);
+            if (status) event.Put("auth.status", status);
+            if (subStatus) event.Put("auth.substatus", subStatus);
+          } else if (eventId == 4648) {
+            event.Put("auth.result", "explicit");
+          }
+          
+          var user = event.Get("winlog.event_data.TargetUserName");
+          var domain = event.Get("winlog.event_data.TargetDomainName");
+          var srcIp = event.Get("winlog.event_data.IpAddress");
+          var workstation = event.Get("winlog.event_data.WorkstationName");
+          var authPkg = event.Get("winlog.event_data.AuthenticationPackageName");
+          var hostname = event.Get("host.name");
+          
+          if (user) event.Put("user.name", user);
+          if (domain) event.Put("user.domain", domain);
+          if (srcIp) event.Put("source.ip", srcIp);
+          if (workstation) event.Put("source.workstation", workstation);
+          if (authPkg) event.Put("auth.package", authPkg);
+          if (logonProcess) event.Put("auth.logon_process", logonProcess);
+          if (hostname) event.Put("host.name", hostname);
+          
+          var msg = "[" + event.Get("auth.result") + "] ";
+          msg += (domain || "") + "\\" + (user || "") + " from " + (srcIp || "unknown");
+          msg += " to " + (hostname || "unknown");
+          msg += " (ws: " + (workstation || "unknown") + ")";
+          
+          if (eventId == 4625 && failureReason) {
+            msg += " - " + failureReason;
+          }
+          
+          event.Put("message", msg);
+        }
+
+  
+  - drop_fields:
+      fields:
+        - "event.original"
+        - "winlog.event_data"
+        - "winlog.activity_id"
+        - "winlog.api"
+        - "winlog.channel"
+        - "winlog.computer_name"
+        - "winlog.keywords"
+        - "winlog.opcode"
+        - "winlog.process"
+        - "winlog.provider_guid"
+        - "winlog.provider_name"
+        - "winlog.record_id"
+        - "winlog.task"
+        - "winlog.version"
+        - "winlog.user"
+        - "host.architecture"
+        - "host.os.build"
+        - "host.os.family"
+        - "host.os.kernel"
+        - "host.os.platform"
+        - "host.os.type"
+        - "host.os.version"
+        - "agent.ephemeral_id"
+        - "agent.id"
+        - "agent.type"
+        - "agent.version"
+        - "ecs.version"
+        - "log.level"
+        - "event.kind"
+        - "event.provider"
+        - "event.created"
+      ignore_missing: true
+
+  - include_fields:
+      fields:
+        - "@timestamp"
+        - "auth.result"
+        - "auth.type"
+        - "auth.package"
+        - "auth.logon_process"
+        - "auth.failure_reason"
+        - "auth.status"
+        - "auth.substatus"
+        - "user.name"
+        - "user.domain"
+        - "source.ip"
+        - "source.workstation"
+        - "host.name"
+        - "host.os.name"
+        - "host.hostname"
+        - "winlog.event_id"
+        - "winlog.logon_type"
+        - "message"
+        - "tags"
+
+# ============================== Output ==============================
+output.logstash:
+  hosts: ["18.143.138.207:5044"]
+  bulk_max_size: 512
+  worker: 1
+  timeout: 30
+  max_retries: 3
+  compression_level: 3
+
+# ============================== Queue ==============================
+queue.mem:
+  events: 512
+  flush.min_events: 128
+  flush.timeout: 5s
+
+# ============================== Logging ==============================
+logging.level: warning
+logging.to_files: true
+logging.files:
+  path: C:/ProgramData/winlogbeat/Logs
+  name: winlogbeat
+  keepfiles: 3
+  rotateeverybytes: 10485760
+
+logging.metrics.enabled: false

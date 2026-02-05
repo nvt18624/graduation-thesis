@@ -1,0 +1,72 @@
+filebeat.inputs:
+- type: filestream
+  id: gitlab-rails-logs
+  enabled: true
+  paths:
+    - /var/log/gitlab/gitlab-rails/*.log
+  fields:
+    service: gitlab
+    log_type: rails
+  tags: ["gitlab_auth"]
+  fields_under_root: true
+  ignore_older: 0
+  json.keys_under_root: true
+  json.add_error_key: true
+  multiline.pattern: '^\{'
+  multiline.negate: true
+  multiline.match: after
+  processors:
+    - drop_event:
+        when:
+          not:
+            or:
+              - contains.message: "authenticated_with_ldap"
+              - contains.message: "Authentication failure"
+              - contains.action: "failure"
+              - contains.path: "/users/auth/ldapmain/callback"
+              - contains.controller: "OmniauthCallbacksController"
+              - contains.controller: "SessionsController"
+
+- type: filestream
+  id: gitlab-nginx-access
+  enabled: true
+  paths:
+    - /var/log/nginx/gitlab_ssl_access.log
+  fields:
+    service: gitlab
+    log_type: nginx_access
+  fields_under_root: true
+  ignore_older: 0
+  processors:
+    - dissect:
+        tokenizer: '%{remote_addr} - %{user} [%{timestamp}] "%{method} %{url} %{http_version}" %{status} %{body_bytes} "%{referrer}" "%{user_agent}" SSL_VERIFY=%{ssl_verify} SSL_SUBJECT="%{ssl_subject}" SSL_ISSUER="%{ssl_issuer}"'
+        field: "message"
+        target_prefix: "nginx"
+    - convert:
+        fields:
+          - {from: "nginx.status", to: "nginx.status", type: "long"}
+          - {from: "nginx.body_bytes", to: "nginx.body_bytes", type: "long"}
+        ignore_missing: true
+    - drop_event:
+        when:
+          not:
+            or:
+              # POST authentication endpoints only
+              - and:
+                  - equals.nginx.method: "POST"
+                  - or:
+                      - contains.nginx.url: "/users/auth/"
+                      - contains.nginx.url: "/-/collect_events"
+                      - contains.nginx.url: "/users/sign_in"
+                      - contains.nginx.url: "/oauth/"
+                      - contains.nginx.url: "/api/v4/session"
+              # SSL NONE security alert (first request only)
+              - and:
+                  - equals.nginx.ssl_verify: "NONE"
+                  - or:
+                      - equals.nginx.url: "/"
+                      - contains.nginx.url: "/users"
+
+output.logstash:
+  hosts: ["<ip_logstash>:5044"]
+
