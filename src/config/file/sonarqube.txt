@@ -1,0 +1,9 @@
+## Create folder for install sonarqube
+mkdir sonarquebe
+cd sonarquebe
+
+## Create folder to volume docker
+mkdir postgresql_data  sonarqube_data  sonarqube_extensions  sonarqube_logs
+
+## Run container
+sudo docker compose up -d
