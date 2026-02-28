@@ -7,7 +7,7 @@ set -e
 
 # ================= CONFIG ========================
 SONAR_URL="http://10.0.1.2:9000"
-SONAR_TOKEN="sqa_278b9f304a025759a97c44a059761a8480a7b16e"
+SONAR_TOKEN="<sona_token>"
 # =================================================
 
 LOG_DIR="/var/log/gitlab/sonarqube"
