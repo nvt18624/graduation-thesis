@@ -1,0 +1,122 @@
+stages:
+  - secret-detection
+  - sast
+  - sca
+  - build
+  - container-scan
+  - gate
+
+# ─────────────────────────────────────
+# STAGE 1: SECRET DETECTION
+# ─────────────────────────────────────
+secret-detection:
+  stage: secret-detection
+  image:
+    name: trufflesecurity/trufflehog:latest
+    entrypoint: [""]
+  script:
+    - trufflehog filesystem . --fail
+  allow_failure: true
+
+# ─────────────────────────────────────
+# STAGE 2: SAST — Semgrep
+# ─────────────────────────────────────
+sast-semgrep:
+  stage: sast
+  image:
+    name: returntocorp/semgrep:latest
+    entrypoint: [""]
+  script:
+    - semgrep scan --config=auto --json --output=semgrep-report.json . || true
+    - semgrep scan --config=auto --error .
+  allow_failure: true
+  artifacts:
+    when: always
+    paths:
+      - semgrep-report.json
+    expire_in: 7 days
+
+# ─────────────────────────────────────
+# STAGE 3: SCA — Trivy filesystem
+# ─────────────────────────────────────
+sca-trivy:
+  stage: sca
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - trivy fs .
+        --severity HIGH,CRITICAL
+        --format json
+        --output trivy-sca-report.json
+        --exit-code 1
+  allow_failure: true
+  artifacts:
+    when: always
+    paths:
+      - trivy-sca-report.json
+    expire_in: 7 days
+
+# ─────────────────────────────────────
+# STAGE 4: BUILD Docker image
+# ─────────────────────────────────────
+build-image:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  variables:
+    DOCKER_TLS_CERTDIR: ""
+    IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+  script:
+    - docker build -t $IMAGE_TAG .
+    - docker save $IMAGE_TAG > image.tar
+  artifacts:
+    paths:
+      - image.tar
+    expire_in: 1 hour
+  rules:
+    - exists:
+        - Dockerfile
+
+# ─────────────────────────────────────
+# STAGE 5: CONTAINER SCAN — Trivy image
+# ─────────────────────────────────────
+container-scan:
+  stage: container-scan
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - trivy image
+        --input image.tar
+        --severity HIGH,CRITICAL
+        --format json
+        --output trivy-image-report.json
+        --exit-code 1
+  allow_failure: true
+  artifacts:
+    when: always
+    paths:
+      - trivy-image-report.json
+    expire_in: 7 days
+  needs:
+    - build-image
+  rules:
+    - exists:
+        - Dockerfile
+
+# ─────────────────────────────────────
+# STAGE 6: GATE
+# ─────────────────────────────────────
+security-gate:
+  stage: gate
+  image: alpine:latest
+  script:
+    - echo "Pipeline completed!"
+    - echo "Branch $CI_COMMIT_BRANCH"
+    - echo "Commit $CI_COMMIT_SHA"
+  needs:
+    - secret-detection
+    - sast-semgrep
+    - sca-trivy
