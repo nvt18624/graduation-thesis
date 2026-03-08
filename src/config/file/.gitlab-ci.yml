@@ -7,6 +7,31 @@ stages:
   - gate
 
 # ─────────────────────────────────────
+# ANCHOR: hàm gửi log lên Logstash
+# ─────────────────────────────────────
+.elk_logging: &elk_logging |
+  send_log() {
+    STAGE=$1
+    STATUS=$2
+    MESSAGE=$3
+    curl -s -X POST "${LOGSTASH_URL}" \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"timestamp\":   \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+        \"pipeline_id\": \"${CI_PIPELINE_ID}\",
+        \"job_id\":      \"${CI_JOB_ID}\",
+        \"job_name\":    \"${CI_JOB_NAME}\",
+        \"stage\":       \"${STAGE}\",
+        \"status\":      \"${STATUS}\",
+        \"branch\":      \"${CI_COMMIT_BRANCH}\",
+        \"commit\":      \"${CI_COMMIT_SHORT_SHA}\",
+        \"author\":      \"${CI_COMMIT_AUTHOR}\",
+        \"project\":     \"${CI_PROJECT_NAME}\",
+        \"message\":     \"${MESSAGE}\"
+      }" || true
+  }
+
+# ─────────────────────────────────────
 # STAGE 1: SECRET DETECTION
 # ─────────────────────────────────────
 secret-detection:
@@ -14,9 +39,25 @@ secret-detection:
   image:
     name: trufflesecurity/trufflehog:latest
     entrypoint: [""]
+  before_script:
+    - apk add --no-cache curl
+    - *elk_logging
+    - send_log "secret-detection" "started" "TruffleHog scan started"
   script:
-    - trufflehog filesystem . --fail
+    - trufflehog filesystem . --fail --json > trufflehog-report.json 2>&1 || true
+    - trufflehog filesystem . 2>&1 | tee trufflehog-report.txt || true
+    - send_log "secret-detection" "completed" "TruffleHog scan completed"
+  after_script:
+    - apk add --no-cache curl 2>/dev/null || true
+    - *elk_logging
+    - send_log "secret-detection" "${CI_JOB_STATUS}" "Job finished status=${CI_JOB_STATUS}"
   allow_failure: true
+  artifacts:
+    when: always
+    paths:
+      - trufflehog-report.json
+      - trufflehog-report.txt
+    expire_in: 30 days
 
 # ─────────────────────────────────────
 # STAGE 2: SAST — Semgrep
@@ -26,15 +67,27 @@ sast-semgrep:
   image:
     name: returntocorp/semgrep:latest
     entrypoint: [""]
+  before_script:
+    - apk add --no-cache curl
+    - *elk_logging
+    - send_log "sast" "started" "Semgrep scan started"
   script:
     - semgrep scan --config=auto --json --output=semgrep-report.json . || true
+    - semgrep scan --config=auto --text --output=semgrep-report.txt . || true
+    - FINDINGS=$(python3 -c "import json; d=json.load(open('semgrep-report.json')); print(len(d.get('results',[])))" 2>/dev/null || echo "unknown")
+    - send_log "sast" "completed" "Semgrep findings=${FINDINGS}"
     - semgrep scan --config=auto --error .
+  after_script:
+    - apk add --no-cache curl 2>/dev/null || true
+    - *elk_logging
+    - send_log "sast" "${CI_JOB_STATUS}" "Job finished status=${CI_JOB_STATUS}"
   allow_failure: true
   artifacts:
     when: always
     paths:
       - semgrep-report.json
-    expire_in: 7 days
+      - semgrep-report.txt
+    expire_in: 30 days
 
 # ─────────────────────────────────────
 # STAGE 3: SCA — Trivy filesystem
@@ -44,18 +97,27 @@ sca-trivy:
   image:
     name: aquasec/trivy:latest
     entrypoint: [""]
+  before_script:
+    - apk add --no-cache curl python3
+    - *elk_logging
+    - send_log "sca" "started" "Trivy SCA scan started"
   script:
-    - trivy fs .
-        --severity HIGH,CRITICAL
-        --format json
-        --output trivy-sca-report.json
-        --exit-code 1
+    - trivy fs . --severity HIGH,CRITICAL --format json --output trivy-sca-report.json || true
+    - trivy fs . --severity HIGH,CRITICAL --format table --output trivy-sca-report.txt || true
+    - VULNS=$(python3 -c "import json; d=json.load(open('trivy-sca-report.json')); print(sum(len(r.get('Vulnerabilities') or []) for r in d.get('Results',[])))" 2>/dev/null || echo "unknown")
+    - send_log "sca" "completed" "Trivy SCA vulnerabilities=${VULNS}"
+    - trivy fs . --severity HIGH,CRITICAL --exit-code 1
+  after_script:
+    - apk add --no-cache curl 2>/dev/null || true
+    - *elk_logging
+    - send_log "sca" "${CI_JOB_STATUS}" "Job finished status=${CI_JOB_STATUS}"
   allow_failure: true
   artifacts:
     when: always
     paths:
       - trivy-sca-report.json
-    expire_in: 7 days
+      - trivy-sca-report.txt
+    expire_in: 30 days
 
 # ─────────────────────────────────────
 # STAGE 4: BUILD Docker image
@@ -68,9 +130,18 @@ build-image:
   variables:
     DOCKER_TLS_CERTDIR: ""
     IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+  before_script:
+    - apk add --no-cache curl
+    - *elk_logging
+    - send_log "build" "started" "Docker build started"
   script:
     - docker build -t $IMAGE_TAG .
     - docker save $IMAGE_TAG > image.tar
+    - send_log "build" "completed" "Docker image built successfully"
+  after_script:
+    - apk add --no-cache curl 2>/dev/null || true
+    - *elk_logging
+    - send_log "build" "${CI_JOB_STATUS}" "Job finished status=${CI_JOB_STATUS}"
   artifacts:
     paths:
       - image.tar
@@ -80,26 +151,34 @@ build-image:
         - Dockerfile
 
 # ─────────────────────────────────────
-# STAGE 5: CONTAINER SCAN — Trivy image
+# STAGE 5: CONTAINER SCAN
 # ─────────────────────────────────────
 container-scan:
   stage: container-scan
   image:
     name: aquasec/trivy:latest
     entrypoint: [""]
+  before_script:
+    - apk add --no-cache curl python3
+    - *elk_logging
+    - send_log "container-scan" "started" "Trivy container scan started"
   script:
-    - trivy image
-        --input image.tar
-        --severity HIGH,CRITICAL
-        --format json
-        --output trivy-image-report.json
-        --exit-code 1
+    - trivy image --input image.tar --severity HIGH,CRITICAL --format json --output trivy-image-report.json || true
+    - trivy image --input image.tar --severity HIGH,CRITICAL --format table --output trivy-image-report.txt || true
+    - VULNS=$(python3 -c "import json; d=json.load(open('trivy-image-report.json')); print(sum(len(r.get('Vulnerabilities') or []) for r in d.get('Results',[])))" 2>/dev/null || echo "unknown")
+    - send_log "container-scan" "completed" "Container vulnerabilities=${VULNS}"
+    - trivy image --input image.tar --severity HIGH,CRITICAL --exit-code 1
+  after_script:
+    - apk add --no-cache curl 2>/dev/null || true
+    - *elk_logging
+    - send_log "container-scan" "${CI_JOB_STATUS}" "Job finished status=${CI_JOB_STATUS}"
   allow_failure: true
   artifacts:
     when: always
     paths:
       - trivy-image-report.json
-    expire_in: 7 days
+      - trivy-image-report.txt
+    expire_in: 30 days
   needs:
     - build-image
   rules:
@@ -112,10 +191,14 @@ container-scan:
 security-gate:
   stage: gate
   image: alpine:latest
+  before_script:
+    - apk add --no-cache curl
+    - *elk_logging
   script:
-    - echo "Pipeline completed!"
-    - echo "Branch $CI_COMMIT_BRANCH"
-    - echo "Commit $CI_COMMIT_SHA"
+    - send_log "gate" "completed" "Pipeline finished branch=${CI_COMMIT_BRANCH} commit=${CI_COMMIT_SHORT_SHA}"
+    - echo "Pipeline completed"
+    - echo "Branch ${CI_COMMIT_BRANCH}"
+    - echo "Commit ${CI_COMMIT_SHA}"
   needs:
     - secret-detection
     - sast-semgrep
