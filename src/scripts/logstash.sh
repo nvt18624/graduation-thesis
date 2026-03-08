@@ -56,11 +56,27 @@ input {
   beats {
     port => 5044
   }
+  http {
+    port => 8080
+    codec => json
+  }
 }
 
 filter {
-  if [service] == "gitlab" {
-    # Rails logs 
+  # ─────────────────────────────────────
+  # GitLab CI Pipeline logs (from HTTP input)
+  # ─────────────────────────────────────
+  if [project] {
+    mutate {
+      add_tag => ["gitlab_ci"]
+      add_field => { "source" => "gitlab-ci" }
+    }
+  }
+
+  # ─────────────────────────────────────
+  # GitLab Rails / Nginx logs (from Beats)
+  # ─────────────────────────────────────
+  else if [service] == "gitlab" {
     if "gitlab_auth" in [tags] {
       if [meta][remote_ip] {
         mutate {
@@ -74,34 +90,36 @@ filter {
       }
       mutate {
         rename => {
-          "ua" => "user_agent"
-          "action" => "[event][action]"
+          "ua"         => "user_agent"
+          "action"     => "[event][action]"
           "controller" => "[event][controller]"
-          "method" => "http.method"
-          "path" => "http.path"
-          "status" => "http.status"
+          "method"     => "http.method"
+          "path"       => "http.path"
+          "status"     => "http.status"
         }
         convert => { "http.status" => "integer" }
       }
     }
-    # Nginx logs 
     else if [log_type] == "nginx_access" {
       mutate {
         rename => {
-          "[nginx][remote_addr]" => "[source][ip]"
-          "[nginx][method]" => "[http][method]"
-          "[nginx][url]" => "[http][path]"
-          "[nginx][status]" => "[http][status_code]"
-          "[nginx][user_agent]" => "[user_agent][original]"
-          "[nginx][referrer]" => "[http][referrer]"
-          "[nginx][body_bytes]" => "[http][response][bytes]"
-          "[nginx][ssl_verify]" => "[tls][established]"
-          "[nginx][ssl_subject]" => "[tls][client][subject]"
-          "[nginx][ssl_issuer]" => "[tls][client][issuer]"
+          "[nginx][remote_addr]"  => "[source][ip]"
+          "[nginx][method]"       => "[http][method]"
+          "[nginx][url]"          => "[http][path]"
+          "[nginx][status]"       => "[http][status_code]"
+          "[nginx][user_agent]"   => "[user_agent][original]"
+          "[nginx][referrer]"     => "[http][referrer]"
+          "[nginx][body_bytes]"   => "[http][response][bytes]"
+          "[nginx][ssl_verify]"   => "[tls][established]"
+          "[nginx][ssl_subject]"  => "[tls][client][subject]"
+          "[nginx][ssl_issuer]"   => "[tls][client][issuer]"
         }
       }
-      # Convert SSL_VERIFY to boolean
       if [tls][established] == "SUCCESS" {
+        mutate {
+          replace => { "[tls][established]" => "true" }
+        }
+      } else if [tls][established] == "NONE" {
         mutate {
           replace => { "[tls][established]" => "true" }
         }
@@ -115,43 +133,53 @@ filter {
 }
 
 output {
-  # Output gitlab auth logs
-  if "gitlab_auth" in [tags] {
+  # GitLab CI pipeline logs
+  if "gitlab_ci" in [tags] {
     elasticsearch {
-      hosts => ["http://192.168.20.161:9200"]
-      index => "gitlab-auth-%{+YYYY.MM.dd}"
-      user => "elastic"
-      password => "<password>"
-    }
-  } else {
-    # Output logs 
-    elasticsearch {
-      hosts => ["http://192.168.20.161:9200"]
-      index => "logs-%{+YYYY.MM.dd}"
-      user => "elastic"
-      password => "<password>"
+      hosts    => ["http://10.0.1.10:9200"]
+      index    => "gitlab-ci-logs-%{+YYYY.MM.dd}"
+      user     => "elastic"
+      password => "gCvmNVuFqQ2cOZUoRqRX"
     }
   }
-  
-  # Backup logs to S3
+  # GitLab auth logs
+  else if "gitlab_auth" in [tags] {
+    elasticsearch {
+      hosts    => ["http://10.0.1.10:9200"]
+      index    => "gitlab-auth-%{+YYYY.MM.dd}"
+      user     => "elastic"
+      password => "gCvmNVuFqQ2cOZUoRqRX"
+    }
+  }
+  # Tất cả logs còn lại
+  else {
+    elasticsearch {
+      hosts    => ["http://10.0.1.10:9200"]
+      index    => "logs-%{+YYYY.MM.dd}"
+      user     => "elastic"
+      password => "gCvmNVuFqQ2cOZUoRqRX"
+    }
+  }
+
+  # Backup lên S3
   s3 {
-    access_key_id => "${AWS_ACCESS_KEY}"
+    access_key_id     => "${AWS_ACCESS_KEY}"
     secret_access_key => "${AWS_SECRET_KEY}"
-    region => "ap-southeast-1"
-    bucket => "zt-devsecops-logs"
-    codec => json_lines
-    encoding => "gzip"
-    prefix => "logs/%{+YYYY/MM/dd}/"
-    size_file => 10485760
-    time_file => 1
-    canned_acl => "private"
-    storage_class => "STANDARD"
+    region            => "ap-southeast-1"
+    bucket            => "zt-devsecops-logs"
+    codec             => json_lines
+    encoding          => "gzip"
+    prefix            => "logs/%{+YYYY/MM/dd}/"
+    size_file         => 10485760
+    time_file         => 1
+    canned_acl        => "private"
+    storage_class     => "STANDARD"
   }
-  
-  # Debug output
+
   stdout { codec => rubydebug }
 }
 EOF
+
 echo " Configuration file created at /etc/logstash/conf.d/gitlab_winlog.conf"
 
 # Reload systemd và enable service

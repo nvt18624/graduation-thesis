@@ -8,6 +8,6 @@ vpc_cidr = "10.0.0.0/16"
 //firewall
 firewall_name  = "web-sg"
 protocol       = "tcp"
-ports          = [22, 80, 443, 5044, 5601, 9200]
+ports          = [22, 80, 443, 5044, 5601, 8080, 9200]
 source_ranges  = ["0.0.0.0/0"]
 
