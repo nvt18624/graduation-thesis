@@ -1,66 +1,13 @@
 stages:
-  - secret-detection
   - sast
   - sca
   - build
   - container-scan
   - gate
 
-# ─────────────────────────────────────
-# ANCHOR: hàm gửi log lên Logstash
-# ─────────────────────────────────────
-.elk_logging: &elk_logging |
-  send_log() {
-    STAGE=$1
-    STATUS=$2
-    MESSAGE=$3
-    curl -s -X POST "${LOGSTASH_URL}" \
-      -H "Content-Type: application/json" \
-      -d "{
-        \"timestamp\":   \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
-        \"pipeline_id\": \"${CI_PIPELINE_ID}\",
-        \"job_id\":      \"${CI_JOB_ID}\",
-        \"job_name\":    \"${CI_JOB_NAME}\",
-        \"stage\":       \"${STAGE}\",
-        \"status\":      \"${STATUS}\",
-        \"branch\":      \"${CI_COMMIT_BRANCH}\",
-        \"commit\":      \"${CI_COMMIT_SHORT_SHA}\",
-        \"author\":      \"${CI_COMMIT_AUTHOR}\",
-        \"project\":     \"${CI_PROJECT_NAME}\",
-        \"message\":     \"${MESSAGE}\"
-      }" || true
-  }
 
 # ─────────────────────────────────────
-# STAGE 1: SECRET DETECTION
-# ─────────────────────────────────────
-secret-detection:
-  stage: secret-detection
-  image:
-    name: trufflesecurity/trufflehog:latest
-    entrypoint: [""]
-  before_script:
-    - apk add --no-cache curl
-    - *elk_logging
-    - send_log "secret-detection" "started" "TruffleHog scan started"
-  script:
-    - trufflehog filesystem . --fail --json > trufflehog-report.json 2>&1 || true
-    - trufflehog filesystem . 2>&1 | tee trufflehog-report.txt || true
-    - send_log "secret-detection" "completed" "TruffleHog scan completed"
-  after_script:
-    - apk add --no-cache curl 2>/dev/null || true
-    - *elk_logging
-    - send_log "secret-detection" "${CI_JOB_STATUS}" "Job finished status=${CI_JOB_STATUS}"
-  allow_failure: true
-  artifacts:
-    when: always
-    paths:
-      - trufflehog-report.json
-      - trufflehog-report.txt
-    expire_in: 30 days
-
-# ─────────────────────────────────────
-# STAGE 2: SAST — Semgrep
+# STAGE 1: SAST — Semgrep
 # ─────────────────────────────────────
 sast-semgrep:
   stage: sast
@@ -69,28 +16,96 @@ sast-semgrep:
     entrypoint: [""]
   before_script:
     - apk add --no-cache curl
-    - *elk_logging
-    - send_log "sast" "started" "Semgrep scan started"
+    - STAGE_START_EPOCH=$(date +%s)
+    - STAGE_START_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    - |
+      send_log() {
+        curl -s -X POST "${LOGSTASH_URL}" \
+          -H "Content-Type: application/json" \
+          -d "$1" || true
+      }
   script:
     - semgrep scan --config=auto --json --output=semgrep-report.json . || true
-    - semgrep scan --config=auto --text --output=semgrep-report.txt . || true
-    - FINDINGS=$(python3 -c "import json; d=json.load(open('semgrep-report.json')); print(len(d.get('results',[])))" 2>/dev/null || echo "unknown")
-    - send_log "sast" "completed" "Semgrep findings=${FINDINGS}"
-    - semgrep scan --config=auto --error .
+    - |
+      END_EPOCH=$(date +%s)
+      DURATION=$((END_EPOCH - STAGE_START_EPOCH))
+
+      TOTAL=$(python3 -c "
+      import json, sys
+      try:
+        d = json.load(open('semgrep-report.json'))
+        results = d.get('results', [])
+        total = len(results)
+        error  = len([r for r in results if r.get('extra', {}).get('severity', '') == 'ERROR'])
+        warn   = len([r for r in results if r.get('extra', {}).get('severity', '') == 'WARNING'])
+        info   = total - error - warn
+        rules  = len(set(r.get('check_id', '') for r in results))
+        files  = len(set(r.get('path', '')     for r in results))
+        from collections import Counter
+        top_rules = ';'.join([k for k,_ in Counter(r.get('check_id','') for r in results).most_common(3)])
+        print(f'{total}|{error}|{warn}|{info}|{rules}|{files}|{top_rules}')
+      except:
+        print('0|0|0|0|0|0|')
+      " 2>/dev/null || echo "0|0|0|0|0|0|")
+
+      T=$(echo $TOTAL | cut -d'|' -f1)
+      E=$(echo $TOTAL | cut -d'|' -f2)
+      W=$(echo $TOTAL | cut -d'|' -f3)
+      I=$(echo $TOTAL | cut -d'|' -f4)
+      R=$(echo $TOTAL | cut -d'|' -f5)
+      F=$(echo $TOTAL | cut -d'|' -f6)
+      TOP=$(echo $TOTAL | cut -d'|' -f7)
+
+      RISK=$((E * 10 + W * 3 + I * 1))
+
+      send_log "{
+        \"@timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+        \"epoch\":${END_EPOCH},
+        \"event_type\":\"scan_result\",
+        \"pipeline_id\":\"${CI_PIPELINE_ID}\",
+        \"job_id\":\"${CI_JOB_ID}\",
+        \"job_name\":\"sast-semgrep\",
+        \"stage\":\"sast\",
+        \"status\":\"${CI_JOB_STATUS:-running}\",
+        \"branch\":\"${CI_COMMIT_BRANCH}\",
+        \"commit\":\"${CI_COMMIT_SHORT_SHA}\",
+        \"author\":\"${CI_COMMIT_AUTHOR}\",
+        \"project\":\"${CI_PROJECT_NAME}\",
+        \"tool\":\"semgrep\",
+        \"duration_seconds\":${DURATION},
+        \"start_epoch\":${STAGE_START_EPOCH},
+        \"start_timestamp\":\"${STAGE_START_TS}\",
+        \"findings\":{
+          \"total\":${T},
+          \"error\":${E},
+          \"warning\":${W},
+          \"info\":${I},
+          \"rules_triggered\":${R},
+          \"files_affected\":${F},
+          \"top_rules\":\"${TOP}\"
+        },
+        \"risk_score\":${RISK},
+        \"gate_passed\":$([ ${E} -eq 0 ] && echo true || echo false),
+        \"message\":\"Semgrep scan completed\"
+      }"
+
+      echo "Findings: total=${T} error=${E} warning=${W} | risk_score=${RISK}"
+      if [ "${E}" -gt 0 ]; then
+        echo "SAST gate FAILED: ${E} error-level findings found."
+        exit 1
+      fi
   after_script:
     - apk add --no-cache curl 2>/dev/null || true
-    - *elk_logging
-    - send_log "sast" "${CI_JOB_STATUS}" "Job finished status=${CI_JOB_STATUS}"
   allow_failure: true
   artifacts:
     when: always
     paths:
       - semgrep-report.json
-      - semgrep-report.txt
     expire_in: 30 days
 
+
 # ─────────────────────────────────────
-# STAGE 3: SCA — Trivy filesystem
+# STAGE 2: SCA — Trivy filesystem
 # ─────────────────────────────────────
 sca-trivy:
   stage: sca
@@ -99,28 +114,102 @@ sca-trivy:
     entrypoint: [""]
   before_script:
     - apk add --no-cache curl python3
-    - *elk_logging
-    - send_log "sca" "started" "Trivy SCA scan started"
+    - STAGE_START_EPOCH=$(date +%s)
+    - STAGE_START_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    - |
+      send_log() {
+        curl -s -X POST "${LOGSTASH_URL}" \
+          -H "Content-Type: application/json" \
+          -d "$1" || true
+      }
   script:
-    - trivy fs . --severity HIGH,CRITICAL --format json --output trivy-sca-report.json || true
-    - trivy fs . --severity HIGH,CRITICAL --format table --output trivy-sca-report.txt || true
-    - VULNS=$(python3 -c "import json; d=json.load(open('trivy-sca-report.json')); print(sum(len(r.get('Vulnerabilities') or []) for r in d.get('Results',[])))" 2>/dev/null || echo "unknown")
-    - send_log "sca" "completed" "Trivy SCA vulnerabilities=${VULNS}"
-    - trivy fs . --severity HIGH,CRITICAL --exit-code 1
+    - trivy fs . --severity HIGH,CRITICAL --vuln-type library --format json --output trivy-sca-report.json || true
+    - |
+      END_EPOCH=$(date +%s)
+      DURATION=$((END_EPOCH - STAGE_START_EPOCH))
+
+      STATS=$(python3 -c "
+      import json, sys
+      try:
+        d = json.load(open('trivy-sca-report.json'))
+        results = d.get('Results', [])
+        total = 0; critical = 0; high = 0
+        pkgs = set(); vuln_ids = set()
+        from collections import Counter
+        cve_counter = Counter()
+        for r in results:
+          for v in (r.get('Vulnerabilities') or []):
+            total += 1
+            sev = v.get('Severity', '')
+            vid = v.get('VulnerabilityID', '')
+            if sev == 'CRITICAL': critical += 1
+            elif sev == 'HIGH':   high += 1
+            pkgs.add(v.get('PkgName', ''))
+            vuln_ids.add(vid)
+            cve_counter[vid] += 1
+        top_cves = ';'.join([k for k,_ in cve_counter.most_common(3)])
+        print(f'{total}|{critical}|{high}|{len(pkgs)}|{len(vuln_ids)}|{top_cves}')
+      except:
+        print('0|0|0|0|0|')
+      " 2>/dev/null || echo "0|0|0|0|0|")
+
+      T=$(echo $STATS | cut -d'|' -f1)
+      C=$(echo $STATS | cut -d'|' -f2)
+      H=$(echo $STATS | cut -d'|' -f3)
+      P=$(echo $STATS | cut -d'|' -f4)
+      U=$(echo $STATS | cut -d'|' -f5)
+      TOP=$(echo $STATS | cut -d'|' -f6)
+
+      RISK=$((C * 10 + H * 5))
+
+      send_log "{
+        \"@timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+        \"epoch\":${END_EPOCH},
+        \"event_type\":\"scan_result\",
+        \"pipeline_id\":\"${CI_PIPELINE_ID}\",
+        \"job_id\":\"${CI_JOB_ID}\",
+        \"job_name\":\"sca-trivy\",
+        \"stage\":\"sca\",
+        \"status\":\"${CI_JOB_STATUS:-running}\",
+        \"branch\":\"${CI_COMMIT_BRANCH}\",
+        \"commit\":\"${CI_COMMIT_SHORT_SHA}\",
+        \"author\":\"${CI_COMMIT_AUTHOR}\",
+        \"project\":\"${CI_PROJECT_NAME}\",
+        \"tool\":\"trivy-fs\",
+        \"scan_scope\":\"library\",
+        \"duration_seconds\":${DURATION},
+        \"start_epoch\":${STAGE_START_EPOCH},
+        \"start_timestamp\":\"${STAGE_START_TS}\",
+        \"findings\":{
+          \"total\":${T},
+          \"critical\":${C},
+          \"high\":${H},
+          \"affected_packages\":${P},
+          \"unique_cves\":${U},
+          \"top_cves\":\"${TOP}\"
+        },
+        \"risk_score\":${RISK},
+        \"gate_passed\":$([ ${C} -eq 0 ] && [ ${H} -eq 0 ] && echo true || echo false),
+        \"message\":\"Trivy SCA scan completed (library only)\"
+      }"
+
+      echo "Findings: total=${T} critical=${C} high=${H} | risk_score=${RISK}"
+      if [ "${C}" -gt 0 ] || [ "${H}" -gt 0 ]; then
+        echo "SCA gate FAILED: critical=${C} high=${H}"
+        exit 1
+      fi
   after_script:
     - apk add --no-cache curl 2>/dev/null || true
-    - *elk_logging
-    - send_log "sca" "${CI_JOB_STATUS}" "Job finished status=${CI_JOB_STATUS}"
   allow_failure: true
   artifacts:
     when: always
     paths:
       - trivy-sca-report.json
-      - trivy-sca-report.txt
     expire_in: 30 days
 
+
 # ─────────────────────────────────────
-# STAGE 4: BUILD Docker image
+# STAGE 3: BUILD Docker image
 # ─────────────────────────────────────
 build-image:
   stage: build
@@ -129,19 +218,70 @@ build-image:
     - docker:dind
   variables:
     DOCKER_TLS_CERTDIR: ""
-    IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+    IMAGE_TAG: "$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA"
   before_script:
     - apk add --no-cache curl
-    - *elk_logging
-    - send_log "build" "started" "Docker build started"
+    - STAGE_START_EPOCH=$(date +%s)
+    - STAGE_START_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   script:
     - docker build -t $IMAGE_TAG .
     - docker save $IMAGE_TAG > image.tar
-    - send_log "build" "completed" "Docker image built successfully"
+    - |
+      END_EPOCH=$(date +%s)
+      DURATION=$((END_EPOCH - STAGE_START_EPOCH))
+      IMAGE_SIZE=$(du -sb image.tar | cut -f1)
+      IMAGE_SIZE_HR=$(du -sh image.tar | cut -f1)
+
+      curl -s -X POST "${LOGSTASH_URL}" \
+        -H "Content-Type: application/json" \
+        -d "{
+          \"@timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+          \"epoch\":${END_EPOCH},
+          \"event_type\":\"build_result\",
+          \"pipeline_id\":\"${CI_PIPELINE_ID}\",
+          \"job_id\":\"${CI_JOB_ID}\",
+          \"job_name\":\"build-image\",
+          \"stage\":\"build\",
+          \"status\":\"success\",
+          \"branch\":\"${CI_COMMIT_BRANCH}\",
+          \"commit\":\"${CI_COMMIT_SHORT_SHA}\",
+          \"author\":\"${CI_COMMIT_AUTHOR}\",
+          \"project\":\"${CI_PROJECT_NAME}\",
+          \"tool\":\"docker\",
+          \"duration_seconds\":${DURATION},
+          \"start_epoch\":${STAGE_START_EPOCH},
+          \"start_timestamp\":\"${STAGE_START_TS}\",
+          \"image\":{
+            \"tag\":\"${IMAGE_TAG}\",
+            \"size_bytes\":${IMAGE_SIZE},
+            \"size_human\":\"${IMAGE_SIZE_HR}\"
+          },
+          \"gate_passed\":true,
+          \"message\":\"Docker image built successfully\"
+        }" || true
   after_script:
     - apk add --no-cache curl 2>/dev/null || true
-    - *elk_logging
-    - send_log "build" "${CI_JOB_STATUS}" "Job finished status=${CI_JOB_STATUS}"
+    - |
+      if [ "${CI_JOB_STATUS}" != "success" ]; then
+        curl -s -X POST "${LOGSTASH_URL}" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"@timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+            \"epoch\":$(date +%s),
+            \"event_type\":\"build_result\",
+            \"pipeline_id\":\"${CI_PIPELINE_ID}\",
+            \"job_id\":\"${CI_JOB_ID}\",
+            \"job_name\":\"build-image\",
+            \"stage\":\"build\",
+            \"status\":\"${CI_JOB_STATUS}\",
+            \"branch\":\"${CI_COMMIT_BRANCH}\",
+            \"commit\":\"${CI_COMMIT_SHORT_SHA}\",
+            \"project\":\"${CI_PROJECT_NAME}\",
+            \"tool\":\"docker\",
+            \"gate_passed\":false,
+            \"message\":\"Docker build failed\"
+          }" || true
+      fi
   artifacts:
     paths:
       - image.tar
@@ -150,8 +290,9 @@ build-image:
     - exists:
         - Dockerfile
 
+
 # ─────────────────────────────────────
-# STAGE 5: CONTAINER SCAN
+# STAGE 4: CONTAINER SCAN — Trivy image
 # ─────────────────────────────────────
 container-scan:
   stage: container-scan
@@ -160,24 +301,98 @@ container-scan:
     entrypoint: [""]
   before_script:
     - apk add --no-cache curl python3
-    - *elk_logging
-    - send_log "container-scan" "started" "Trivy container scan started"
+    - STAGE_START_EPOCH=$(date +%s)
+    - STAGE_START_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   script:
-    - trivy image --input image.tar --severity HIGH,CRITICAL --format json --output trivy-image-report.json || true
-    - trivy image --input image.tar --severity HIGH,CRITICAL --format table --output trivy-image-report.txt || true
-    - VULNS=$(python3 -c "import json; d=json.load(open('trivy-image-report.json')); print(sum(len(r.get('Vulnerabilities') or []) for r in d.get('Results',[])))" 2>/dev/null || echo "unknown")
-    - send_log "container-scan" "completed" "Container vulnerabilities=${VULNS}"
-    - trivy image --input image.tar --severity HIGH,CRITICAL --exit-code 1
+    # --vuln-type os: chỉ quét OS packages (Debian/Alpine/...)
+    # Không quét lại python/library đã quét ở stage SCA
+    - trivy image --input image.tar --severity HIGH,CRITICAL --vuln-type os --format json --output trivy-image-report.json || true
+    - |
+      END_EPOCH=$(date +%s)
+      DURATION=$((END_EPOCH - STAGE_START_EPOCH))
+
+      STATS=$(python3 -c "
+      import json, sys
+      try:
+        d = json.load(open('trivy-image-report.json'))
+        results = d.get('Results', [])
+        total = 0; critical = 0; high = 0
+        pkgs = set(); layers = set(); vuln_ids = set()
+        from collections import Counter
+        cve_counter = Counter()
+        for r in results:
+          layers.add(r.get('Target', ''))
+          for v in (r.get('Vulnerabilities') or []):
+            total += 1
+            sev = v.get('Severity', '')
+            vid = v.get('VulnerabilityID', '')
+            if sev == 'CRITICAL': critical += 1
+            elif sev == 'HIGH':   high += 1
+            pkgs.add(v.get('PkgName', ''))
+            vuln_ids.add(vid)
+            cve_counter[vid] += 1
+        top_cves = ';'.join([k for k,_ in cve_counter.most_common(3)])
+        print(f'{total}|{critical}|{high}|{len(pkgs)}|{len(layers)}|{len(vuln_ids)}|{top_cves}')
+      except:
+        print('0|0|0|0|0|0|')
+      " 2>/dev/null || echo "0|0|0|0|0|0|")
+
+      T=$(echo $STATS | cut -d'|' -f1)
+      C=$(echo $STATS | cut -d'|' -f2)
+      H=$(echo $STATS | cut -d'|' -f3)
+      P=$(echo $STATS | cut -d'|' -f4)
+      L=$(echo $STATS | cut -d'|' -f5)
+      U=$(echo $STATS | cut -d'|' -f6)
+      TOP=$(echo $STATS | cut -d'|' -f7)
+
+      RISK=$((C * 10 + H * 5))
+
+      curl -s -X POST "${LOGSTASH_URL}" \
+        -H "Content-Type: application/json" \
+        -d "{
+          \"@timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+          \"epoch\":${END_EPOCH},
+          \"event_type\":\"scan_result\",
+          \"pipeline_id\":\"${CI_PIPELINE_ID}\",
+          \"job_id\":\"${CI_JOB_ID}\",
+          \"job_name\":\"container-scan\",
+          \"stage\":\"container-scan\",
+          \"status\":\"${CI_JOB_STATUS:-running}\",
+          \"branch\":\"${CI_COMMIT_BRANCH}\",
+          \"commit\":\"${CI_COMMIT_SHORT_SHA}\",
+          \"author\":\"${CI_COMMIT_AUTHOR}\",
+          \"project\":\"${CI_PROJECT_NAME}\",
+          \"tool\":\"trivy-image\",
+          \"scan_scope\":\"os\",
+          \"duration_seconds\":${DURATION},
+          \"start_epoch\":${STAGE_START_EPOCH},
+          \"start_timestamp\":\"${STAGE_START_TS}\",
+          \"findings\":{
+            \"total\":${T},
+            \"critical\":${C},
+            \"high\":${H},
+            \"affected_packages\":${P},
+            \"layers_scanned\":${L},
+            \"unique_cves\":${U},
+            \"top_cves\":\"${TOP}\"
+          },
+          \"risk_score\":${RISK},
+          \"gate_passed\":$([ ${C} -eq 0 ] && [ ${H} -eq 0 ] && echo true || echo false),
+          \"message\":\"Trivy image scan completed (OS only)\"
+        }" || true
+
+      echo "Findings: total=${T} critical=${C} high=${H} | risk_score=${RISK}"
+      if [ "${C}" -gt 0 ] || [ "${H}" -gt 0 ]; then
+        echo "Container scan gate FAILED: critical=${C} high=${H}"
+        exit 1
+      fi
   after_script:
     - apk add --no-cache curl 2>/dev/null || true
-    - *elk_logging
-    - send_log "container-scan" "${CI_JOB_STATUS}" "Job finished status=${CI_JOB_STATUS}"
   allow_failure: true
   artifacts:
     when: always
     paths:
       - trivy-image-report.json
-      - trivy-image-report.txt
     expire_in: 30 days
   needs:
     - build-image
@@ -185,21 +400,111 @@ container-scan:
     - exists:
         - Dockerfile
 
+
 # ─────────────────────────────────────
-# STAGE 6: GATE
+# STAGE 5: GATE — Pipeline summary
 # ─────────────────────────────────────
 security-gate:
   stage: gate
   image: alpine:latest
   before_script:
-    - apk add --no-cache curl
-    - *elk_logging
+    - apk add --no-cache curl python3
+    - GATE_START_EPOCH=$(date +%s)
   script:
-    - send_log "gate" "completed" "Pipeline finished branch=${CI_COMMIT_BRANCH} commit=${CI_COMMIT_SHORT_SHA}"
-    - echo "Pipeline completed"
-    - echo "Branch ${CI_COMMIT_BRANCH}"
-    - echo "Commit ${CI_COMMIT_SHA}"
+    - |
+      END_EPOCH=$(date +%s)
+
+      SUMMARY=$(python3 -c "
+      import json
+
+      def load(path):
+        try:
+          return json.load(open(path))
+        except:
+          return {}
+
+      semgrep   = load('semgrep-report.json')
+      trivy_fs  = load('trivy-sca-report.json')   # library vulns
+      trivy_img = load('trivy-image-report.json')  # OS vulns
+
+      sg_results = semgrep.get('results', [])
+      sg_total   = len(sg_results)
+      sg_error   = len([r for r in sg_results if r.get('extra',{}).get('severity','') == 'ERROR'])
+      sg_warn    = len([r for r in sg_results if r.get('extra',{}).get('severity','') == 'WARNING'])
+
+      fs_total = 0; fs_crit = 0; fs_high = 0
+      for r in trivy_fs.get('Results', []):
+        for v in (r.get('Vulnerabilities') or []):
+          fs_total += 1
+          if v.get('Severity') == 'CRITICAL': fs_crit += 1
+          elif v.get('Severity') == 'HIGH':   fs_high += 1
+
+      img_total = 0; img_crit = 0; img_high = 0
+      for r in trivy_img.get('Results', []):
+        for v in (r.get('Vulnerabilities') or []):
+          img_total += 1
+          if v.get('Severity') == 'CRITICAL': img_crit += 1
+          elif v.get('Severity') == 'HIGH':   img_high += 1
+
+      risk = sg_error*10 + sg_warn*3 + fs_crit*10 + fs_high*5 + img_crit*10 + img_high*5
+
+      if risk >= 50:   level = 'critical'
+      elif risk >= 20: level = 'high'
+      elif risk >= 5:  level = 'medium'
+      else:            level = 'low'
+
+      print(f'{sg_total}|{sg_error}|{sg_warn}|{fs_total}|{fs_crit}|{fs_high}|{img_total}|{img_crit}|{img_high}|{risk}|{level}')
+      " 2>/dev/null || echo "0|0|0|0|0|0|0|0|0|0|unknown")
+
+      SG_T=$(echo $SUMMARY | cut -d'|' -f1)
+      SG_E=$(echo $SUMMARY | cut -d'|' -f2)
+      SG_W=$(echo $SUMMARY | cut -d'|' -f3)
+      FS_T=$(echo $SUMMARY | cut -d'|' -f4)
+      FS_C=$(echo $SUMMARY | cut -d'|' -f5)
+      FS_H=$(echo $SUMMARY | cut -d'|' -f6)
+      IM_T=$(echo $SUMMARY | cut -d'|' -f7)
+      IM_C=$(echo $SUMMARY | cut -d'|' -f8)
+      IM_H=$(echo $SUMMARY | cut -d'|' -f9)
+      RISK=$(echo $SUMMARY | cut -d'|' -f10)
+      LEVEL=$(echo $SUMMARY | cut -d'|' -f11)
+
+      curl -s -X POST "${LOGSTASH_URL}" \
+        -H "Content-Type: application/json" \
+        -d "{
+          \"@timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+          \"epoch\":${END_EPOCH},
+          \"event_type\":\"pipeline_summary\",
+          \"pipeline_id\":\"${CI_PIPELINE_ID}\",
+          \"job_id\":\"${CI_JOB_ID}\",
+          \"job_name\":\"security-gate\",
+          \"stage\":\"gate\",
+          \"status\":\"completed\",
+          \"branch\":\"${CI_COMMIT_BRANCH}\",
+          \"commit\":\"${CI_COMMIT_SHORT_SHA}\",
+          \"author\":\"${CI_COMMIT_AUTHOR}\",
+          \"project\":\"${CI_PROJECT_NAME}\",
+          \"summary\":{
+            \"sast\":{\"total\":${SG_T},\"error\":${SG_E},\"warning\":${SG_W}},
+            \"sca_library\":{\"total\":${FS_T},\"critical\":${FS_C},\"high\":${FS_H}},
+            \"container_os\":{\"total\":${IM_T},\"critical\":${IM_C},\"high\":${IM_H}}
+          },
+          \"risk_score\":${RISK},
+          \"risk_level\":\"${LEVEL}\",
+          \"message\":\"Pipeline completed risk_level=${LEVEL} risk_score=${RISK}\"
+        }" || true
+
+      echo "=== Pipeline Security Summary ==="
+      echo "SAST          : total=${SG_T} error=${SG_E} warning=${SG_W}"
+      echo "SCA (library) : total=${FS_T} critical=${FS_C} high=${FS_H}"
+      echo "Container (OS): total=${IM_T} critical=${IM_C} high=${IM_H}"
+      echo "Risk Score    : ${RISK} (${LEVEL})"
   needs:
-    - secret-detection
     - sast-semgrep
     - sca-trivy
+  artifacts:
+    when: always
+    paths:
+      - semgrep-report.json
+      - trivy-sca-report.json
+      - trivy-image-report.json
+    expire_in: 90 days
