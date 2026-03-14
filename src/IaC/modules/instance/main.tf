@@ -11,6 +11,8 @@ resource "aws_instance" "default" {
 
   vpc_security_group_ids = var.security_groups
 
+  iam_instance_profile = var.iam_instance_profile != "" ? var.iam_instance_profile : null
+
   user_data = var.file_script != "" ? file(var.file_script) : null
 
   tags = {

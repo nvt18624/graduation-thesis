@@ -51,3 +51,9 @@ variable "file_script" {
   type        = string
   default     = ""
 }
+
+variable "iam_instance_profile" {
+  description = "IAM instance profile name to attach to the EC2 instance"
+  type        = string
+  default     = ""
+}

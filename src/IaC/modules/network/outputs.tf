@@ -18,3 +18,11 @@ output "internet_gateway_id" {
 output "public_route_table_id" {
   value = aws_route_table.public_rt.id
 }
+
+output "private_subnet_id" {
+  value = aws_subnet.private_subnet.id
+}
+
+output "nat_gateway_id" {
+  value = aws_nat_gateway.nat_gw.id
+}
