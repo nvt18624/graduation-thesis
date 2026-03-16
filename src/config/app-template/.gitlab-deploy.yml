@@ -1,0 +1,154 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PUSH TO ECR – dev tự cấu hình cho app của mình
+# ─────────────────────────────────────────────────────────────────────────────
+push-ecr:
+  stage: push-ecr
+  image: docker:latest
+  services:
+    - docker:dind
+  variables:
+    DOCKER_TLS_CERTDIR: ""
+  environment:
+    name: $GITLAB_USER_LOGIN
+  before_script:
+    - apk add --no-cache curl aws-cli
+    - STAGE_START_EPOCH=$(date +%s)
+    - aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPO_URL}
+  script:
+    - docker load -i image.tar
+    - IMAGE_TAG="${ECR_REPO_URL}:sha-${CI_COMMIT_SHORT_SHA}"
+    - docker tag "$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA" "${IMAGE_TAG}"
+    - docker push "${IMAGE_TAG}"
+    - echo "IMAGE_TAG=${IMAGE_TAG}" >> deploy.env
+    - |
+      END_EPOCH=$(date +%s)
+      curl -s -X POST "${LOGSTASH_URL}" -H "Content-Type: application/json" -d "{
+        \"@timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+        \"event_type\":\"ecr_push\",
+        \"pipeline_id\":\"${CI_PIPELINE_ID}\",
+        \"stage\":\"push-ecr\",
+        \"branch\":\"${CI_COMMIT_BRANCH}\",
+        \"triggered_by\":\"${GITLAB_USER_LOGIN}\",
+        \"commit\":\"${CI_COMMIT_SHORT_SHA}\",
+        \"project\":\"${CI_PROJECT_NAME}\",
+        \"app\":\"${APP_TAG}\",
+        \"image_tag\":\"${IMAGE_TAG}\",
+        \"duration_seconds\":$((END_EPOCH - STAGE_START_EPOCH)),
+        \"message\":\"ECR push by ${GITLAB_USER_LOGIN}\"
+      }" || true
+  artifacts:
+    reports:
+      dotenv: deploy.env
+  needs:
+    - build-image
+    - security-gate       
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH =~ /^dev/'
+      exists:
+        - Dockerfile
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEPLOY – dev tự cấu hình deploy app của mình
+# ─────────────────────────────────────────────────────────────────────────────
+deploy:
+  stage: deploy
+  image:
+    name: amazon/aws-cli:latest
+    entrypoint: [""]
+  environment:
+    name: $GITLAB_USER_LOGIN
+  before_script:
+    - apk add --no-cache curl
+    - STAGE_START_EPOCH=$(date +%s)
+  script:
+    - |
+      OLD_IDS=$(aws ec2 describe-instances \
+        --region ${AWS_REGION} \
+        --filters \
+          "Name=tag:App,Values=${APP_TAG}" \
+          "Name=tag:DeployedBy,Values=${GITLAB_USER_LOGIN}" \
+          "Name=instance-state-name,Values=running,pending,stopped" \
+        --query 'Reservations[*].Instances[*].InstanceId' \
+        --output text)
+
+      if [ -n "${OLD_IDS}" ]; then
+        echo "Terminating old instance: ${OLD_IDS}"
+        aws ec2 terminate-instances --region ${AWS_REGION} --instance-ids ${OLD_IDS}
+        aws ec2 wait instance-terminated --region ${AWS_REGION} --instance-ids ${OLD_IDS}
+      fi
+
+    - |
+      cat > userdata.sh <<USERDATA
+      #!/bin/bash
+      yum update -y && yum install -y docker
+      systemctl start docker && systemctl enable docker
+      aws ecr get-login-password --region ${AWS_REGION} \
+        | docker login --username AWS --password-stdin ${ECR_REPO_URL}
+      docker pull ${IMAGE_TAG}
+      docker stop app 2>/dev/null || true
+      docker rm   app 2>/dev/null || true
+      docker run -d --name app --restart always \
+        -p ${APP_PORT}:${APP_PORT} \
+        --label "deployed-by=${GITLAB_USER_LOGIN}" \
+        --label "commit=${CI_COMMIT_SHORT_SHA}" \
+        ${IMAGE_TAG}
+      USERDATA
+
+    - |
+      INSTANCE_ID=$(aws ec2 run-instances \
+        --region ${AWS_REGION} \
+        --image-id ${EC2_AMI_ID} \
+        --instance-type ${EC2_INSTANCE_TYPE} \
+        --subnet-id ${SUBNET_ID} \
+        --security-group-ids ${APP_SG_ID} \
+        --iam-instance-profile Name=${EC2_INSTANCE_PROFILE} \
+        --user-data file://userdata.sh \
+        --tag-specifications "ResourceType=instance,Tags=[
+          {Key=Name,Value=${APP_TAG}-${GITLAB_USER_LOGIN}-${CI_COMMIT_SHORT_SHA}},
+          {Key=App,Value=${APP_TAG}},
+          {Key=DeployedBy,Value=${GITLAB_USER_LOGIN}},
+          {Key=Branch,Value=${CI_COMMIT_BRANCH}},
+          {Key=Pipeline,Value=${CI_PIPELINE_ID}},
+          {Key=Commit,Value=${CI_COMMIT_SHORT_SHA}}
+        ]" \
+        --query 'Instances[0].InstanceId' \
+        --output text)
+
+    - aws ec2 wait instance-running --region ${AWS_REGION} --instance-ids ${INSTANCE_ID}
+
+    - |
+      PUBLIC_IP=$(aws ec2 describe-instances \
+        --region ${AWS_REGION} --instance-ids ${INSTANCE_ID} \
+        --query 'Reservations[0].Instances[0].PublicIpAddress' \
+        --output text)
+
+      echo "========================================"
+      echo "Deployed by : ${GITLAB_USER_LOGIN}"
+      echo "App         : ${APP_TAG}"
+      echo "Instance    : ${INSTANCE_ID}"
+      echo "URL         : http://${PUBLIC_IP}:${APP_PORT}"
+      echo "========================================"
+
+    - |
+      END_EPOCH=$(date +%s)
+      curl -s -X POST "${LOGSTASH_URL}" -H "Content-Type: application/json" -d "{
+        \"@timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+        \"event_type\":\"deploy\",
+        \"pipeline_id\":\"${CI_PIPELINE_ID}\",
+        \"stage\":\"deploy\",
+        \"branch\":\"${CI_COMMIT_BRANCH}\",
+        \"triggered_by\":\"${GITLAB_USER_LOGIN}\",
+        \"commit\":\"${CI_COMMIT_SHORT_SHA}\",
+        \"project\":\"${CI_PROJECT_NAME}\",
+        \"app\":\"${APP_TAG}\",
+        \"instance_id\":\"${INSTANCE_ID}\",
+        \"public_ip\":\"${PUBLIC_IP}\",
+        \"app_url\":\"http://${PUBLIC_IP}:${APP_PORT}\",
+        \"duration_seconds\":$((END_EPOCH - STAGE_START_EPOCH)),
+        \"message\":\"Deployed by ${GITLAB_USER_LOGIN}\"
+      }" || true
+  needs:
+    - push-ecr
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH =~ /^dev/'
