@@ -1,4 +1,4 @@
-# ── Trust policy chung cho EC2 ────────────────────────────────────────────────
+# ── Trust policy for EC2 ────────────────────────────────────────────────
 data "aws_iam_policy_document" "ec2_assume_role" {
   statement {
     actions = ["sts:AssumeRole"]
