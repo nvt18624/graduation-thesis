@@ -54,9 +54,6 @@ output "elas_private_ips" {
   value = module.elas.internal_ips
 }
 
-output "kibana_private_ips" {
-  value = module.kibana.internal_ips
-}
 
 output "logstash_private" {
   value = module.logstash.internal_ips

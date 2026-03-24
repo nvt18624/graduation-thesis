@@ -1,4 +1,4 @@
-#! /bin/bash
+#!/bin/bash
 set -e  # Exit on error
 
 echo "=== LOGSTASH INSTALLATION SCRIPT ==="
@@ -136,7 +136,7 @@ output {
   # GitLab CI pipeline logs
   if "gitlab_ci" in [tags] {
     elasticsearch {
-      hosts    => ["http://10.0.1.10:9200"]
+      hosts    => ["http://10.0.3.10:9200"]
       index    => "gitlab-ci-logs-%{+YYYY.MM.dd}"
       user     => "elastic"
       password => "gCvmNVuFqQ2cOZUoRqRX"
@@ -145,7 +145,7 @@ output {
   # GitLab auth logs
   else if "gitlab_auth" in [tags] {
     elasticsearch {
-      hosts    => ["http://10.0.1.10:9200"]
+      hosts    => ["http://10.0.3.10:9200"]
       index    => "gitlab-auth-%{+YYYY.MM.dd}"
       user     => "elastic"
       password => "gCvmNVuFqQ2cOZUoRqRX"
@@ -154,7 +154,7 @@ output {
   # Tất cả logs còn lại
   else {
     elasticsearch {
-      hosts    => ["http://10.0.1.10:9200"]
+      hosts    => ["http://10.0.3.10:9200"]
       index    => "logs-%{+YYYY.MM.dd}"
       user     => "elastic"
       password => "gCvmNVuFqQ2cOZUoRqRX"

@@ -9,14 +9,14 @@ public_subnet_2_az   = "ap-southeast-1b"
 
 private_app_subnet_cidr  = "10.0.2.0/24"   # App EC2 (created/destroyed per dev request)
 private_app_subnet_az    = "ap-southeast-1a"
-private_siem_subnet_cidr = "10.0.3.0/24"   # Elasticsearch, Kibana, Logstash
+private_siem_subnet_cidr = "10.0.3.0/24"   # Elasticsearch, Kibana
 private_siem_subnet_az   = "ap-southeast-1a"
 private_data_subnet_cidr = "10.0.4.0/24"   # DB + S3/ECR via VPC endpoints (no internet)
 private_data_subnet_az   = "ap-southeast-1a"
 
 # ── Security ──────────────────────────────────────────────────────────────────
 # Replace with your actual admin IP (e.g. "203.0.113.10/32")
-admin_cidr_blocks = ["171.241.57.160/32"]
+admin_cidr_blocks = ["171.241.12.255/32"]
 
 # Replace with your on-premise network CIDR(s) that ship logs
 onpremise_cidr_blocks = ["118.70.57.134/32"]

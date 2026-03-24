@@ -45,14 +45,14 @@ module "iam" {
   log_s3_bucket_arns = var.log_s3_bucket_arns
 }
 
-# ── Load Balancers: 3 ALBs (HTTPS 443) + 1 NLB (5044, 8080) ──────────────────
+# ── Load Balancers: 
 module "load_balancers" {
   source             = "./modules/load_balancers/"
   prefix             = var.network_name
   vpc_id             = module.network.vpc_id
   alb_sg_id          = module.security_groups.sg_alb_id
   public_subnet_ids  = module.network.public_subnet_ids
-  kibana_instance_id = module.kibana.instance_ids[0]
+  kibana_instance_id = module.elas.instance_ids[0]
 }
 
 # ── Bastion Host (public subnet, SSH jump to private instances) ────────────────
@@ -70,39 +70,25 @@ module "bastion" {
 
 //// SIEM Stack (Elasticsearch, Kibana, Logstash) – private SIEM subnet 10.0.3.0/24
 
-# Elasticsearch – private SIEM subnet, no public IP
+# Elasticsearch + Kibana – private SIEM subnet, no public IP
 module "elas" {
   source               = "./modules/instance"
   instance_name        = "elas"
-  machine_type         = "t3.micro"
+  machine_type         = "m7i-flex.large"
   ami_id               = var.ami_id
   subnetwork           = module.network.private_siem_subnet_id
-  security_groups      = [module.security_groups.sg_elasticsearch_id]
+  security_groups      = [module.security_groups.sg_elasticsearch_id, module.security_groups.sg_kibana_id]
   key_name             = var.key_name
   enable_public_ip     = false
   internal_ip          = ["10.0.3.10"]
   iam_instance_profile = module.iam.elasticsearch_instance_profile
 }
 
-# Kibana – private SIEM subnet, access via ALB-2 only
-module "kibana" {
-  source               = "./modules/instance"
-  instance_name        = "kibana"
-  machine_type         = "t3.micro"
-  ami_id               = var.ami_id
-  subnetwork           = module.network.private_siem_subnet_id
-  security_groups      = [module.security_groups.sg_kibana_id]
-  key_name             = var.key_name
-  enable_public_ip     = false
-  internal_ip          = ["10.0.3.11"]
-  iam_instance_profile = module.iam.kibana_instance_profile
-}
-
 # Logstash – public subnet, internet-facing that receive log from on-premise
 module "logstash" {
   source               = "./modules/instance"
   instance_name        = "logstash"
-  machine_type         = "t3.micro"
+  machine_type         = "m7i-flex.large"
   ami_id               = var.ami_id
   subnetwork           = module.network.public_subnet_id
   security_groups      = [module.security_groups.sg_logstash_id]
@@ -131,27 +117,12 @@ resource "null_resource" "copy_elas_script" {
     destination = "/home/ubuntu/elas.sh"
   }
 
-  depends_on = [module.elas, module.bastion]
-}
-
-resource "null_resource" "copy_kibana_script" {
-  connection {
-    type        = "ssh"
-    user        = "ubuntu"
-    private_key = file("/home/tn18624/.ssh/id_rsa")
-    host        = module.kibana.internal_ips[0]
-
-    bastion_host        = module.bastion.external_ips[0]
-    bastion_user        = "ubuntu"
-    bastion_private_key = file("/home/tn18624/.ssh/id_rsa")
-  }
-
   provisioner "file" {
     source      = "scripts/kibana.sh"
     destination = "/home/ubuntu/kibana.sh"
   }
 
-  depends_on = [module.kibana, module.bastion]
+  depends_on = [module.elas, module.bastion]
 }
 
 resource "null_resource" "copy_logstash_script" {

@@ -33,11 +33,12 @@ sudo chmod 640 "$ES_CONF"
 sudo systemctl daemon-reload
 sudo systemctl enable elasticsearch.service
 sudo systemctl start elasticsearch.service
-sudo systemctl restart elasticsearch.service
 
+# Wait until Elasticsearch is ready (timeout 120s)
+echo "Waiting for Elasticsearch..."
+sleep 40
 
 # Generate tokens + password
 sudo /usr/share/elasticsearch/bin/elasticsearch-create-enrollment-token -s kibana | sudo tee /home/ubuntu/token-kibana.txt
-sudo /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic >> /home/ubuntu/elastic_password.txt
-sudo /usr/share/elasticsearch/bin/elasticsearch-reset-password -u kibana_system >> /home/ubuntu/password_kibana_system.txt
-
+sudo /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -b | sudo tee /home/ubuntu/elastic_password.txt
+sudo /usr/share/elasticsearch/bin/elasticsearch-reset-password -u kibana_system -b | sudo tee /home/ubuntu/password_kibana_system.txt
