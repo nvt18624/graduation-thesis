@@ -161,7 +161,7 @@ resource "aws_security_group" "sg_logstash" {
     from_port   = 5044
     to_port     = 5044
     protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
+    cidr_blocks = concat([var.vpc_cidr], var.onpremise_cidr_blocks)
   }
 
   ingress {
@@ -169,7 +169,7 @@ resource "aws_security_group" "sg_logstash" {
     from_port   = 8080
     to_port     = 8080
     protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
+    cidr_blocks = concat([var.vpc_cidr], var.onpremise_cidr_blocks)
   }
 
   ingress {
@@ -177,7 +177,7 @@ resource "aws_security_group" "sg_logstash" {
     from_port       = 22
     to_port         = 22
     protocol        = "tcp"
-    security_groups = [aws_security_group.sg_bastion.id]
+    cidr_blocks = concat([var.vpc_cidr], var.onpremise_cidr_blocks)
   }
 
   egress {
