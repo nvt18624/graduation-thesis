@@ -1,37 +1,42 @@
 #!/bin/bash
 set -e
-
 # =================================================
 # SEMGREP QUALITY GATE - PRE-RECEIVE HOOK
+# Scan TẤT CẢ commits trong mỗi push
 # SCAN: Secret Detection + Code Smell
 # =================================================
-
 # ================= ENV ==========================
 export PATH="/usr/local/bin:/opt/semgrep-venv/bin:/usr/bin:/bin:$PATH"
 export HOME="/var/opt/gitlab"
 export SEMGREP_SETTINGS_FILE="/var/opt/gitlab/.semgrep/settings.yml"
 export SEMGREP_SEND_METRICS=off
-
 # ================= CONFIG =======================
 LOG_DIR="/var/log/gitlab/semgrep"
 LOG_FILE="${LOG_DIR}/gate.log"
 TEMP_BASE="/tmp/semgrep-scans"
-
 STRICT_BRANCHES=("main" "master" "developer" "production")
 WARN_ONLY_BRANCHES=("feature")
+LOGSTASH_URL="${LOGSTASH_URL:-http://your-logstash-host:5044}"
 # =================================================
-
 mkdir -p "$LOG_DIR"
 mkdir -p "$TEMP_BASE"
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
-
 log() {
   echo "[$(date '+%F %T')] [$GL_PROJECT_PATH] [$GL_USERNAME] $1" | tee -a "$LOG_FILE"
+}
+
+# ===============================================
+# Function: push log to Logstash 
+# ===============================================
+send_log() {
+  local PAYLOAD="$1"
+  curl -s --max-time 5 -X POST "${LOGSTASH_URL}" \
+    -H "Content-Type: application/json" \
+    -d "$PAYLOAD" >> "$LOG_FILE" 2>&1 || true
 }
 
 # ===============================================
@@ -42,7 +47,6 @@ if ! command -v semgrep &> /dev/null; then
   echo -e "${RED}Semgrep not installed${NC}"
   exit 1
 fi
-
 log "============================================="
 log "Semgrep Quality Gate Started"
 log "Project: $GL_PROJECT_PATH | User: $GL_USERNAME"
@@ -53,25 +57,38 @@ log "Project: $GL_PROJECT_PATH | User: $GL_USERNAME"
 scan_commit() {
   local COMMIT=$1
   local BRANCH=$2
-
   SCAN_ID="$(date +%s)-$$-${COMMIT:0:8}"
   TEMP_DIR="${TEMP_BASE}/scan-${SCAN_ID}"
   mkdir -p "$TEMP_DIR"
   chmod 700 "$TEMP_DIR"
 
+  SCAN_START=$(date +%s)
+
   # Extract code
   if ! git archive --format=tar "$COMMIT" | tar -xC "$TEMP_DIR" 2>> "$LOG_FILE"; then
     log "git archive failed for $COMMIT"
     rm -rf "$TEMP_DIR"
+
+    send_log "{
+      \"@timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+      \"event_type\":\"pre_receive_scan\",
+      \"project\":\"${GL_PROJECT_PATH}\",
+      \"user\":\"${GL_USERNAME}\",
+      \"branch\":\"${BRANCH}\",
+      \"commit\":\"${COMMIT:0:8}\",
+      \"status\":\"error\",
+      \"error\":\"git_archive_failed\",
+      \"gate_passed\":false,
+      \"message\":\"Pre-receive scan error\"
+    }"
+
     echo "0"
     return
   fi
 
   SECRET_OUTPUT="${TEMP_DIR}/secrets.json"
   SMELL_OUTPUT="${TEMP_DIR}/smells.json"
-
   set +e
-
   semgrep scan \
     --config=p/secrets \
     --config=p/gitleaks \
@@ -85,8 +102,10 @@ scan_commit() {
     --json --output="$SMELL_OUTPUT" \
     --quiet --no-error --timeout 60 \
     "$TEMP_DIR" >> "$LOG_FILE" 2>&1
-
   set -e
+
+  SCAN_END=$(date +%s)
+  SCAN_DURATION=$((SCAN_END - SCAN_START))
 
   # Deduplicate và đếm
   SECRET_COUNT=$(python3 -c "
@@ -120,9 +139,45 @@ except: print(0)
 " 2>/dev/null || echo "0")
 
   TOTAL=$((SECRET_COUNT + SMELL_COUNT))
-  log "Commit=${COMMIT:0:8} secrets=$SECRET_COUNT smells=$SMELL_COUNT total=$TOTAL"
+  RISK=$((SECRET_COUNT * 10 + SMELL_COUNT * 3))
 
-  # In chi tiết findings
+  TOP_RULES=$(python3 -c "
+import json
+from collections import Counter
+rules=[]
+for f in ['$SECRET_OUTPUT','$SMELL_OUTPUT']:
+  try:
+    d=json.load(open(f))
+    rules+=[r.get('check_id','').split('.')[-1] for r in d.get('results',[])]
+  except: pass
+top=';'.join([k for k,_ in Counter(rules).most_common(3)])
+print(top if top else 'none')
+" 2>/dev/null || echo "none")
+
+  log "Commit=${COMMIT:0:8} secrets=$SECRET_COUNT smells=$SMELL_COUNT total=$TOTAL duration=${SCAN_DURATION}s"
+
+  # ─── Push log each commit to Logstash ───
+  send_log "{
+    \"@timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+    \"event_type\":\"pre_receive_scan\",
+    \"project\":\"${GL_PROJECT_PATH}\",
+    \"user\":\"${GL_USERNAME}\",
+    \"branch\":\"${BRANCH}\",
+    \"commit\":\"${COMMIT:0:8}\",
+    \"duration_seconds\":${SCAN_DURATION},
+    \"findings\":{
+      \"secrets\":${SECRET_COUNT},
+      \"code_smells\":${SMELL_COUNT},
+      \"total\":${TOTAL},
+      \"top_rules\":\"${TOP_RULES}\"
+    },
+    \"risk_score\":${RISK},
+    \"gate_passed\":$([ ${TOTAL} -eq 0 ] && echo true || echo false),
+    \"status\":\"$([ ${TOTAL} -eq 0 ] && echo passed || echo findings_found)\",
+    \"message\":\"Pre-receive commit scan completed\"
+  }"
+
+  # Return detail findings
   if [ "$SECRET_COUNT" -gt 0 ]; then
     echo ""
     echo -e "${RED} SECRET in commit ${COMMIT:0:8}: $SECRET_COUNT findings${NC}"
@@ -172,8 +227,8 @@ except: pass
 # Process Push
 # ===============================================
 while read oldrev newrev refname; do
-
   branch="${refname##refs/heads/}"
+  PUSH_START=$(date +%s)
   log "Branch=$branch NewRev=$newrev OldRev=$oldrev"
 
   # Skip delete branch
@@ -182,7 +237,7 @@ while read oldrev newrev refname; do
     continue
   fi
 
-  # Xác định strict mode
+  # Determine strict mode
   STRICT_MODE=false
   for b in "${STRICT_BRANCHES[@]}"; do
     if [[ "$branch" == "$b" ]]; then
@@ -196,6 +251,7 @@ while read oldrev newrev refname; do
   # ─────────────────────────────────────
   if [[ "$oldrev" == "0000000000000000000000000000000000000000" ]]; then
     COMMITS="$newrev"
+    COMMIT_COUNT=1
     log "New branch — scanning HEAD only"
   else
     COMMITS=$(git rev-list "$oldrev..$newrev" 2>/dev/null || echo "$newrev")
@@ -206,7 +262,7 @@ while read oldrev newrev refname; do
   fi
 
   # ─────────────────────────────────────
-  # Scan each commit
+  # Scan every commit
   # ─────────────────────────────────────
   PUSH_BLOCKED=false
   BLOCKED_LIST=""
@@ -222,7 +278,7 @@ while read oldrev newrev refname; do
     RESULT=$(scan_commit "$COMMIT" "$branch")
     COMMIT_TOTAL=$(echo "$RESULT" | tail -1 | tr -d '[:space:]')
 
-    # read again count from log
+    # Read again count from log
     LAST_LOG=$(grep "Commit=${COMMIT:0:8}" "$LOG_FILE" | tail -1)
     C_SEC=$(echo "$LAST_LOG" | grep -oP 'secrets=\K[0-9]+' || echo "0")
     C_SME=$(echo "$LAST_LOG" | grep -oP 'smells=\K[0-9]+' || echo "0")
@@ -235,40 +291,82 @@ while read oldrev newrev refname; do
     fi
   done
 
+  PUSH_END=$(date +%s)
+  PUSH_DURATION=$((PUSH_END - PUSH_START))
+  GRAND_TOTAL=$((GRAND_TOTAL_SECRETS + GRAND_TOTAL_SMELLS))
+  GRAND_RISK=$((GRAND_TOTAL_SECRETS * 10 + GRAND_TOTAL_SMELLS * 3))
+
   # ─────────────────────────────────────
-  # Final Decision
+  # Final Decision + push log push summary
   # ─────────────────────────────────────
   if $PUSH_BLOCKED; then
     if $STRICT_MODE; then
-      echo ""
-      echo -e "${RED}════════════════════════════════════════════════════${NC}"
-      echo -e "${RED} PUSH BLOCKED — Branch: $branch${NC}"
-      echo -e "${RED}════════════════════════════════════════════════════${NC}"
-      echo ""
-      echo "  Blocked commits  :$BLOCKED_LIST"
-      echo "  Total secrets    : $GRAND_TOTAL_SECRETS"
-      echo "  Total code smells: $GRAND_TOTAL_SMELLS"
-      echo ""
-      echo "  Fix ALL commits before pushing to [$branch]!"
-      echo "  Hint: git rebase -i origin/$branch to squash/edit commits"
-      echo "  See details at: $LOG_FILE"
-      echo ""
-      log "BLOCKED: branch=$branch commits=$BLOCKED_LIST secrets=$GRAND_TOTAL_SECRETS smells=$GRAND_TOTAL_SMELLS"
-      exit 1
+      FINAL_STATUS="blocked"
+      FINAL_DECISION="block"
     else
-      echo ""
-      echo -e "${YELLOW}════════════════════════════════════════════════════${NC}"
-      echo -e "${YELLOW} WARNING — Branch: $branch (push allowed)${NC}"
-      echo -e "${YELLOW}════════════════════════════════════════════════════${NC}"
-      echo ""
-      echo "  Affected commits :$BLOCKED_LIST"
-      echo "  Total secrets    : $GRAND_TOTAL_SECRETS"
-      echo "  Total code smells: $GRAND_TOTAL_SMELLS"
-      echo ""
-      echo "  Fix before creating MR to main!"
-      echo ""
-      log "WARNING: branch=$branch commits=$BLOCKED_LIST secrets=$GRAND_TOTAL_SECRETS smells=$GRAND_TOTAL_SMELLS"
+      FINAL_STATUS="warning"
+      FINAL_DECISION="warn"
     fi
+  else
+    FINAL_STATUS="passed"
+    FINAL_DECISION="allow"
+  fi
+
+  send_log "{
+    \"@timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+    \"event_type\":\"pre_receive_push_summary\",
+    \"project\":\"${GL_PROJECT_PATH}\",
+    \"user\":\"${GL_USERNAME}\",
+    \"branch\":\"${branch}\",
+    \"newrev\":\"${newrev:0:8}\",
+    \"oldrev\":\"${oldrev:0:8}\",
+    \"strict_mode\":${STRICT_MODE},
+    \"commit_count\":${COMMIT_COUNT},
+    \"duration_seconds\":${PUSH_DURATION},
+    \"findings\":{
+      \"secrets\":${GRAND_TOTAL_SECRETS},
+      \"code_smells\":${GRAND_TOTAL_SMELLS},
+      \"total\":${GRAND_TOTAL},
+      \"blocked_commits\":\"${BLOCKED_LIST}\"
+    },
+    \"risk_score\":${GRAND_RISK},
+    \"gate_passed\":$([ \"${FINAL_DECISION}\" = \"allow\" ] && echo true || echo false),
+    \"decision\":\"${FINAL_DECISION}\",
+    \"status\":\"${FINAL_STATUS}\",
+    \"message\":\"Pre-receive push gate: ${FINAL_STATUS}\"
+  }"
+
+  if [ "$FINAL_STATUS" = "blocked" ]; then
+    echo ""
+    echo -e "${RED}════════════════════════════════════════════════════${NC}"
+    echo -e "${RED} PUSH BLOCKED — Branch: $branch${NC}"
+    echo -e "${RED}════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo "  Blocked commits  :$BLOCKED_LIST"
+    echo "  Total secrets    : $GRAND_TOTAL_SECRETS"
+    echo "  Total code smells: $GRAND_TOTAL_SMELLS"
+    echo ""
+    echo "  Fix ALL commits before pushing to [$branch]!"
+    echo "  Hint: git rebase -i origin/$branch to squash/edit commits"
+    echo "  See details at: $LOG_FILE"
+    echo ""
+    log "BLOCKED: branch=$branch commits=$BLOCKED_LIST secrets=$GRAND_TOTAL_SECRETS smells=$GRAND_TOTAL_SMELLS"
+    exit 1
+
+  elif [ "$FINAL_STATUS" = "warning" ]; then
+    echo ""
+    echo -e "${YELLOW}════════════════════════════════════════════════════${NC}"
+    echo -e "${YELLOW} WARNING — Branch: $branch (push allowed)${NC}"
+    echo -e "${YELLOW}════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo "  Affected commits :$BLOCKED_LIST"
+    echo "  Total secrets    : $GRAND_TOTAL_SECRETS"
+    echo "  Total code smells: $GRAND_TOTAL_SMELLS"
+    echo ""
+    echo "  Fix before creating MR to main!"
+    echo ""
+    log "WARNING: branch=$branch commits=$BLOCKED_LIST secrets=$GRAND_TOTAL_SECRETS smells=$GRAND_TOTAL_SMELLS"
+
   else
     echo ""
     echo -e "${GREEN}════════════════════════════════════════════════════${NC}"
@@ -286,3 +384,4 @@ done
 log "All checks completed"
 log "============================================="
 exit 0
+
