@@ -21,10 +21,25 @@
 
 ---
 ## Architecture Overview
-![Existing control strategies](references/architectures/ECS.png)
-![Zero-trust pipeline flow](references/architectures/zero-trust-flow.png)
-![AWS network design (production zero-trust cloud)](references/architectures/aws.png)
-![AI detection & rollback loop](references/architectures/AI.png)
+<figure>  
+<img  src="references/architectures/ECS.png"  alt="Existing control strategies">  
+<figcaption>Existing control strategies</figcaption>  
+</figure>  
+  
+<figure>  
+<img  src="references/architectures/zero-trust-flow.png"  alt="Zero-trust pipeline flow">  
+<figcaption>Zero-trust pipeline flow</figcaption>  
+</figure>  
+  
+<figure>  
+<img  src="references/architectures/aws.png"  alt="AWS network design (production zero-trust cloud)">  
+<figcaption>AWS network design (production zero-trust cloud)</figcaption>  
+</figure>  
+  
+<figure>  
+<img  src="references/architectures/AI.png"  alt="AI detection & rollback loop">  
+<figcaption>AI detection & rollback loop</figcaption>  
+</figure>
 
 ## Prerequisites
 
@@ -49,14 +64,17 @@ You must provision **at least 7 VMs** with the following roles:
 
 > **Note:** VMs `vm-elk-01` and `vm-elk-02` form the **dedicated ELK logging cluster** (2 VMs). The remaining VMs host your application workloads and developer(dev) join, test.
 
-#### Public Cloud Account (Recommended: AWS)
+####Public Cloud Account (Recommended: AWS)
 
 You must have **at least one active public cloud account**. AWS is the recommended provider for this setup.
 
 ---
-### Minimum required AWS services
 
-![Example use for admin](references/readme/IAM_admin.png)
+
+<figure>  
+<img  src="references/readme/IAM_admin.png"  alt="IAM admin">  
+<figcaption>Example use for admin</figcaption>  
+</figure>
 - **Amazon EC2** — For provisioning cloud-based virtual machines to run applications and services (optional but recommended for scalability and control).
 
 - **Amazon S3** — For long-term log archiving, backup storage, and Elasticsearch snapshot management.
