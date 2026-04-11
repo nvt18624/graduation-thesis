@@ -57,3 +57,9 @@ variable "iam_instance_profile" {
   type        = string
   default     = ""
 }
+
+variable "extra_tags" {
+  description = "Additional tags to merge onto the instance (e.g. App=app1 for SSM targeting)"
+  type        = map(string)
+  default     = {}
+}

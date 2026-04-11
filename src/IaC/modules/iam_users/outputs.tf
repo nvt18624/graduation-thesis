@@ -33,7 +33,12 @@ output "app_sg_ids" {
   }
 }
 
-# Summary for admin to know what key  → user  → app 
+output "app_instance_profile" {
+  description = "IAM instance profile name to attach to app EC2 instances"
+  value       = aws_iam_instance_profile.app_ec2.name
+}
+
+# Summary for admin to know what key  → user  → app
 output "user_app_mapping" {
   description = "Mapping user → apps được phép (không sensitive)"
   value = {

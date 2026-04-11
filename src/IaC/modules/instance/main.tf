@@ -15,7 +15,8 @@ resource "aws_instance" "default" {
 
   user_data = var.file_script != "" ? file(var.file_script) : null
 
-  tags = {
-    Name = var.instance_count > 1 ? "${var.instance_name}-${count.index}" : var.instance_name
-  }
+  tags = merge(
+    { Name = var.instance_count > 1 ? "${var.instance_name}-${count.index}" : var.instance_name },
+    var.extra_tags
+  )
 }

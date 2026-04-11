@@ -149,14 +149,32 @@ resource "null_resource" "copy_logstash_script" {
 //// by dev users via iam_users module permissions (ECR push + SSM deploy).
 //// No static instances defined here; use module "instance" ad-hoc per app.
 
-# module "database" {
-#   source           = "./modules/instance"
-#   instance_name    = "database"
-#   machine_type     = "t3.micro"
-#   ami_id           = var.ami_id
-#   subnetwork       = module.network.private_data_subnet_id
-#   security_groups  = [module.security_groups.sg_db_id]
-#   key_name         = var.key_name
-#   enable_public_ip = false
-#   internal_ip      = ["10.0.4.10"]
-# }
+module "app1" {
+  source               = "./modules/instance"
+  instance_name        = "app1"
+  machine_type         = "t3.micro"
+  ami_id               = var.ami_id
+  subnetwork           = module.network.private_app_subnet_id
+  security_groups      = [module.iam_users.app_sg_ids["app1"]]
+  key_name             = var.key_name
+  enable_public_ip     = false
+  internal_ip          = ["10.0.2.10"]
+  file_script          = "scripts/docker.sh"
+  iam_instance_profile = module.iam_users.app_instance_profile
+  extra_tags           = { App = "app1" }
+}
+
+module "app2" {
+  source               = "./modules/instance"
+  instance_name        = "app2"
+  machine_type         = "t3.micro"
+  ami_id               = var.ami_id
+  subnetwork           = module.network.private_app_subnet_id
+  security_groups      = [module.iam_users.app_sg_ids["app2"]]
+  key_name             = var.key_name
+  enable_public_ip     = false
+  internal_ip          = ["10.0.2.12"]
+  file_script          = "scripts/docker.sh"
+  iam_instance_profile = module.iam_users.app_instance_profile
+  extra_tags           = { App = "app2" }
+}

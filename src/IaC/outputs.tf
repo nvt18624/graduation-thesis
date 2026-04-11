@@ -67,6 +67,15 @@ output "bastion_public_ip" {
   value = module.bastion.external_ips
 }
 
+# --- App private ip --------------------------------------
+output "app1_private_ip" {
+  value = module.app1.internal_ips
+}
+
+output "app2_private_ip" {
+  value = module.app2.internal_ips
+}
+
 # ── Security Groups ───────────────────────────────────────────────────────────
 output "sg_alb_id" {
   value = module.security_groups.sg_alb_id
