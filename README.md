@@ -21,25 +21,29 @@
 
 ---
 ## Architecture Overview
-<figure>  
-<img  src="references/architectures/ECS.png"  alt="Existing control strategies">  
-<figcaption>Existing control strategies</figcaption>  
-</figure>  
-  
-<figure>  
-<img  src="references/architectures/zero-trust-flow.png"  alt="Zero-trust pipeline flow">  
-<figcaption>Zero-trust pipeline flow</figcaption>  
-</figure>  
-  
-<figure>  
-<img  src="references/architectures/aws.png"  alt="AWS network design (production zero-trust cloud)">  
-<figcaption>AWS network design (production zero-trust cloud)</figcaption>  
-</figure>  
-  
-<figure>  
-<img  src="references/architectures/AI.png"  alt="AI detection & rollback loop">  
-<figcaption>AI detection & rollback loop</figcaption>  
-</figure>
+<p align="center">
+  <img src="references/architectures/ECS.png" alt="Existing control strategies" width="70%" />
+  <br/>
+  <em>Existing control strategies</em>
+</p>
+
+<p align="center">
+  <img src="references/architectures/zero-trust-flow.png" alt="Zero-trust pipeline flow" width="70%" />
+  <br/>
+  <em>Zero-trust pipeline flow</em>
+</p>
+
+<p align="center">
+  <img src="references/architectures/aws.png" alt="AWS network design (production zero-trust cloud)" width="70%" />
+  <br/>
+  <em>AWS network design (production zero-trust cloud)</em>
+</p>
+
+<p align="center">
+  <img src="references/architectures/AI.png" alt="AI detection & rollback loop" width="70%" />
+  <br/>
+  <em>AI detection & rollback loop</em>
+</p>
 
 ## Prerequisites
 
@@ -69,12 +73,13 @@ You must provision **at least 7 VMs** with the following roles:
 You must have **at least one active public cloud account**. AWS is the recommended provider for this setup.
 
 ---
+<p align="center">
+  <img src="references/readme/IAM_admin.png" alt="Example use for admin" width="70%" />
+  <br/>
+  <em>Example use for admin</em>
+</p>
 
 
-<figure>  
-<img  src="references/readme/IAM_admin.png"  alt="IAM admin">  
-<figcaption>Example use for admin</figcaption>  
-</figure>
 - **Amazon EC2** — For provisioning cloud-based virtual machines to run applications and services (optional but recommended for scalability and control).
 
 - **Amazon S3** — For long-term log archiving, backup storage, and Elasticsearch snapshot management.
