@@ -486,7 +486,7 @@ resource "aws_cloudwatch_event_target" "ssm_deploy" {
   for_each = var.apps
 
   rule     = aws_cloudwatch_event_rule.ecr_push[each.key].name
-  arn      = "arn:aws:ssm:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:document/AWS-RunShellScript"
+  arn      = "arn:aws:ssm:${data.aws_region.current.id}::document/AWS-RunShellScript"
   role_arn = aws_iam_role.eventbridge_ssm.arn
 
   run_command_targets {
