@@ -157,7 +157,7 @@ resource "aws_iam_policy" "user_policy" {
   policy      = data.aws_iam_policy_document.user_policy[each.key].json
 
   tags = {
-    User      = each.key
+    User        = each.key
     AllowedApps = join(",", each.value.allowed_apps)
   }
 }
@@ -180,6 +180,14 @@ resource "aws_security_group" "apps" {
     description = "App port from internal VPC"
     from_port   = each.value.app_port
     to_port     = each.value.app_port
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  ingress {
+    description = "SSH from bastion (within VPC)"
+    from_port   = 22
+    to_port     = 22
     protocol    = "tcp"
     cidr_blocks = [var.vpc_cidr]
   }
@@ -230,9 +238,9 @@ resource "aws_iam_policy" "app_ecr_pull" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "ECRGetToken"
-        Effect = "Allow"
-        Action = ["ecr:GetAuthorizationToken"]
+        Sid      = "ECRGetToken"
+        Effect   = "Allow"
+        Action   = ["ecr:GetAuthorizationToken"]
         Resource = ["*"]
       },
       {
@@ -257,6 +265,57 @@ resource "aws_iam_role_policy_attachment" "app_ec2_ecr" {
 resource "aws_iam_instance_profile" "app_ec2" {
   name = "${var.prefix}-app-ec2-profile"
   role = aws_iam_role.app_ec2.name
+}
+
+# ── SSM Parameters ────────────────────────────────────────────────────────────
+
+# Port per app – set at Terraform apply time, read by rollback Lambda
+resource "aws_ssm_parameter" "app_port" {
+  for_each = var.apps
+
+  name  = "/${var.prefix}/${each.key}/port"
+  type  = "String"
+  value = tostring(each.value.app_port)
+
+  tags = { App = each.key, ManagedBy = "terraform" }
+}
+
+# Stable-tag placeholder – overwritten by EventBridge pipeline after each successful deploy
+resource "aws_ssm_parameter" "app_stable_tag" {
+  for_each = var.apps
+
+  name  = "/${var.prefix}/${each.key}/stable-tag"
+  type  = "String"
+  value = "none"
+
+  lifecycle {
+    ignore_changes = [value] # Terraform no overwrite after the first deployment
+  }
+
+  tags = { App = each.key, ManagedBy = "terraform" }
+}
+
+# App EC2 need to  stable-tag after deploy successful
+resource "aws_iam_policy" "app_ssm_stable_tag" {
+  name        = "${var.prefix}-app-ssm-stable-tag"
+  description = "Allow app EC2 to write stable-tag to SSM Parameter Store after deploy"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid    = "SSMPutStableTag"
+      Effect = "Allow"
+      Action = ["ssm:PutParameter"]
+      Resource = [
+        "arn:aws:ssm:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:parameter/${var.prefix}/*/stable-tag"
+      ]
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "app_ec2_stable_tag" {
+  role       = aws_iam_role.app_ec2.name
+  policy_arn = aws_iam_policy.app_ssm_stable_tag.arn
 }
 
 # ── IAM Role for EventBridge to send SSM Run Command ─────────────────────────
@@ -291,6 +350,114 @@ resource "aws_iam_role_policy" "eventbridge_ssm" {
         ]
       }
     ]
+  })
+}
+
+# ── Lambda: AI rollback endpoint ─────────────────────────────────────────────
+
+data "archive_file" "rollback_lambda" {
+  type        = "zip"
+  output_path = "${path.module}/rollback_lambda.zip"
+  source_dir  = "${path.module}/lambda"
+}
+
+resource "aws_iam_role" "rollback_lambda" {
+  name = "${var.prefix}-rollback-lambda-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = { Name = "${var.prefix}-rollback-lambda-role" }
+}
+
+resource "aws_iam_role_policy" "rollback_lambda" {
+  role = aws_iam_role.rollback_lambda.name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "CloudWatchLogs"
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = ["arn:aws:logs:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/${var.prefix}-rollback:*"]
+      },
+      {
+        Sid    = "SSMGetParams"
+        Effect = "Allow"
+        Action = ["ssm:GetParameters"]
+        Resource = [
+          "arn:aws:ssm:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:parameter/${var.prefix}/*"
+        ]
+      },
+      {
+        Sid    = "SSMSendCommandInstance"
+        Effect = "Allow"
+        Action = ["ssm:SendCommand"]
+        Resource = [
+          "arn:aws:ec2:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:instance/*"
+        ]
+        Condition = {
+          StringEquals = {
+            "ssm:resourceTag/App" = keys(var.apps)
+          }
+        }
+      },
+      {
+        Sid      = "SSMSendCommandDoc"
+        Effect   = "Allow"
+        Action   = ["ssm:SendCommand"]
+        Resource = ["arn:aws:ssm:${data.aws_region.current.id}::document/AWS-RunShellScript"]
+      },
+      {
+        Sid      = "EC2Describe"
+        Effect   = "Allow"
+        Action   = ["ec2:DescribeInstances"]
+        Resource = ["*"]
+      }
+    ]
+  })
+}
+
+resource "aws_lambda_function" "rollback" {
+  function_name    = "${var.prefix}-rollback"
+  role             = aws_iam_role.rollback_lambda.arn
+  filename         = data.archive_file.rollback_lambda.output_path
+  source_code_hash = data.archive_file.rollback_lambda.output_base64sha256
+  handler          = "index.handler"
+  runtime          = "python3.12"
+  timeout          = 30
+
+  environment {
+    variables = {
+      PREFIX     = var.prefix
+      REGION     = data.aws_region.current.id
+      ACCOUNT_ID = data.aws_caller_identity.current.account_id
+    }
+  }
+
+  tags = { Name = "${var.prefix}-rollback", ManagedBy = "terraform" }
+}
+
+# IAM policy cho AI system gọi vào rollback Lambda
+resource "aws_iam_policy" "ai_rollback_invoke" {
+  name        = "${var.prefix}-ai-rollback-invoke"
+  description = "Allow AI system to invoke rollback Lambda"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid      = "InvokeRollback"
+      Effect   = "Allow"
+      Action   = ["lambda:InvokeFunction"]
+      Resource = [aws_lambda_function.rollback.arn]
+    }]
   })
 }
 
@@ -345,7 +512,8 @@ resource "aws_cloudwatch_event_target" "ssm_deploy" {
         "docker stop ${each.key} 2>/dev/null || true",
         "docker rm ${each.key} 2>/dev/null || true",
         "docker run -d --name ${each.key} --restart unless-stopped -p ${each.value.app_port}:${each.value.app_port} $IMAGE",
-        "echo Deploy ${each.key}:$IMAGE done"
+        "aws ssm put-parameter --name \"/${var.prefix}/${each.key}/stable-tag\" --value \"<image_tag>\" --type String --overwrite",
+        "echo Deploy ${each.key}:<image_tag> done"
       ]
     }
     TEMPLATE

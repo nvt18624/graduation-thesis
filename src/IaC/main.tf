@@ -164,17 +164,17 @@ module "app1" {
   extra_tags           = { App = "app1" }
 }
 
-module "app2" {
-  source               = "./modules/instance"
-  instance_name        = "app2"
-  machine_type         = "t3.micro"
-  ami_id               = var.ami_id
-  subnetwork           = module.network.private_app_subnet_id
-  security_groups      = [module.iam_users.app_sg_ids["app2"]]
-  key_name             = var.key_name
-  enable_public_ip     = false
-  internal_ip          = ["10.0.2.12"]
-  file_script          = "scripts/docker.sh"
-  iam_instance_profile = module.iam_users.app_instance_profile
-  extra_tags           = { App = "app2" }
-}
+# module "app2" {
+#   source               = "./modules/instance"
+#   instance_name        = "app2"
+#   machine_type         = "t2.micro"
+#   ami_id               = var.ami_id
+#   subnetwork           = module.network.private_app_subnet_id
+#   security_groups      = [module.iam_users.app_sg_ids["app2"]]
+#   key_name             = var.key_name
+#   enable_public_ip     = false
+#   internal_ip          = ["10.0.2.12"]
+#   file_script          = "scripts/docker.sh"
+#   iam_instance_profile = module.iam_users.app_instance_profile
+#   extra_tags           = { App = "app2" }
+# }

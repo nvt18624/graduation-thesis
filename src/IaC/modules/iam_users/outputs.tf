@@ -7,7 +7,7 @@ output "user_credentials" {
       AWS_REGION   = ap-southeast-1
       ECR_REPO_URL = <ecr url của app họ>
   EOT
-  sensitive = true
+  sensitive   = true
   value = {
     for user, key in aws_iam_access_key.devs : user => {
       access_key_id     = key.id
@@ -36,6 +36,16 @@ output "app_sg_ids" {
 output "app_instance_profile" {
   description = "IAM instance profile name to attach to app EC2 instances"
   value       = aws_iam_instance_profile.app_ec2.name
+}
+
+output "rollback_lambda_arn" {
+  description = "ARN of the AI rollback Lambda – pass to AI system to invoke"
+  value       = aws_lambda_function.rollback.arn
+}
+
+output "ai_rollback_policy_arn" {
+  description = "IAM policy ARN granting lambda:InvokeFunction on the rollback Lambda – attach to AI system's IAM role/user"
+  value       = aws_iam_policy.ai_rollback_invoke.arn
 }
 
 # Summary for admin to know what key  → user  → app

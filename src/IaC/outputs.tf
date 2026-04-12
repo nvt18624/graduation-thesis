@@ -72,9 +72,9 @@ output "app1_private_ip" {
   value = module.app1.internal_ips
 }
 
-output "app2_private_ip" {
-  value = module.app2.internal_ips
-}
+# output "app2_private_ip" {
+#   value = module.app2.internal_ips
+# }
 
 # ── Security Groups ───────────────────────────────────────────────────────────
 output "sg_alb_id" {
