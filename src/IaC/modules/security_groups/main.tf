@@ -12,6 +12,17 @@ resource "aws_security_group" "sg_alb" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  dynamic "ingress" {
+    for_each = toset(var.app_ports)
+    content {
+      description = "App port ${ingress.value} from internet"
+      from_port   = ingress.value
+      to_port     = ingress.value
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
+
   egress {
     from_port   = 0
     to_port     = 0

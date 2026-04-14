@@ -29,3 +29,9 @@ variable "app_sg_ids" {
   type        = list(string)
   default     = []
 }
+
+variable "app_ports" {
+  description = "App ports to open on the ALB SG from the internet (e.g. [3000, 8080])"
+  type        = list(number)
+  default     = []
+}

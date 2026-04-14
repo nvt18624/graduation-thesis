@@ -29,7 +29,7 @@ log_s3_bucket_arns = []
 # ── Apps (each gets 1 ECR repo + security group) ─────────────────────────────
 apps = {
   app1 = { app_port = 8080 }
-  app2 = { app_port = 3000 }
+  app2 = { app_port = 5000 }
 }
 
 # ── Dev users (least privilege – can only deploy to assigned apps) ────────────

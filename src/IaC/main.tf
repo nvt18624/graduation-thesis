@@ -36,6 +36,7 @@ module "security_groups" {
   admin_cidr_blocks     = var.admin_cidr_blocks
   onpremise_cidr_blocks = var.onpremise_cidr_blocks
   app_sg_ids            = values(module.iam_users.app_sg_ids)
+  app_ports             = [for k, v in var.apps : v.app_port]
 }
 
 # ── IAM Roles + Instance Profiles for ELK stack ───────────────────────────────
@@ -45,7 +46,7 @@ module "iam" {
   log_s3_bucket_arns = var.log_s3_bucket_arns
 }
 
-# ── Load Balancers: 
+# ── Load Balancers: ALB with dynamic listeners per app port ───────────────────
 module "load_balancers" {
   source             = "./modules/load_balancers/"
   prefix             = var.network_name
@@ -53,6 +54,10 @@ module "load_balancers" {
   alb_sg_id          = module.security_groups.sg_alb_id
   public_subnet_ids  = module.network.public_subnet_ids
   kibana_instance_id = module.elas.instance_ids[0]
+  app_ports          = { for k, v in var.apps : k => v.app_port }
+  app_instances = {
+    app2 = module.app2.instance_ids[0]
+  }
 }
 
 # ── Bastion Host (public subnet, SSH jump to private instances) ────────────────

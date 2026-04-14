@@ -22,3 +22,15 @@ variable "kibana_instance_id" {
   description = "EC2 instance ID of Kibana – registered as ALB target on /kibana*"
   type        = string
 }
+
+variable "app_ports" {
+  description = "Map of app name → port; each entry gets 1 listener + target group on the ALB"
+  type        = map(number)
+  default     = {}
+}
+
+variable "app_instances" {
+  description = "Map of app name → instance ID; registers the instance into the matching target group"
+  type        = map(string)
+  default     = {}
+}

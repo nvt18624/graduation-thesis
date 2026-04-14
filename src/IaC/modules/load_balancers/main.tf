@@ -85,3 +85,46 @@ resource "aws_lb_target_group_attachment" "kibana" {
   target_id        = var.kibana_instance_id
   port             = 5601
 }
+
+# ── Target Groups: 1 per app (dynamic) ───────────────────────────────────────
+resource "aws_lb_target_group" "apps" {
+  for_each = var.app_ports
+
+  name        = "${local.name}-tg-${each.key}"
+  port        = each.value
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "instance"
+
+  health_check {
+    path                = "/"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    interval            = 30
+  }
+
+  tags = { Name = "${local.name}-tg-${each.key}", App = each.key }
+}
+
+# ── Listeners: 1 per app port (internet → ALB:PORT) ──────────────────────────
+resource "aws_lb_listener" "apps" {
+  for_each = var.app_ports
+
+  load_balancer_arn = aws_lb.alb.arn
+  port              = each.value
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.apps[each.key].arn
+  }
+}
+
+# ── Register app instances to their target groups ────────────────────────────
+resource "aws_lb_target_group_attachment" "apps" {
+  for_each = var.app_instances
+
+  target_group_arn = aws_lb_target_group.apps[each.key].arn
+  target_id        = each.value
+  port             = var.app_ports[each.key]
+}
