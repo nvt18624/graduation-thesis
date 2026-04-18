@@ -124,3 +124,21 @@ variable "dev_users" {
   }))
   default = {}
 }
+
+# ── Anomaly Detection ─────────────────────────────────────────────────────────
+variable "sklearn_layer_arn" {
+  description = "ARN của Lambda Layer chứa scikit-learn + numpy (tạo thủ công hoặc dùng public layer)"
+  type        = string
+}
+
+variable "anomaly_window_minutes" {
+  description = "Kích thước time window cho inference (phút) – phải khớp với lúc train model"
+  type        = number
+  default     = 60
+}
+
+variable "alert_email" {
+  description = "Email nhận SNS alert khi phát hiện anomaly (để trống nếu không cần)"
+  type        = string
+  default     = ""
+}

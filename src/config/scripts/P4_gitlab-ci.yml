@@ -1,0 +1,435 @@
+stages:
+  - sast
+  - sca
+  - build
+  - container-scan
+  - gate
+  - push-ecr
+  - deploy
+
+variables:
+  AWS_REGION: "ap-southeast-1"
+  SAST_MAX_ERROR: "0"
+  SCA_MAX_CRITICAL: "0"
+  SCA_MAX_HIGH: "5"
+  IMAGE_MAX_CRITICAL: "0"
+  IMAGE_MAX_HIGH: "5"
+
+include:
+  - project: '$CI_PROJECT_PATH'
+    ref: '$CI_COMMIT_REF_NAME'
+    file: '.gitlab-deploy.yml'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 1: SAST — Semgrep
+# ─────────────────────────────────────────────────────────────────────────────
+sast-semgrep:
+  stage: sast
+  image:
+    name: python:3.11-alpine
+    entrypoint: [""]
+  before_script:
+    - apk add --no-cache curl bash
+    - pip install semgrep --quiet
+  script:
+    - STAGE_START_EPOCH=$(date +%s)
+    - semgrep scan --config=auto --json --output=semgrep-report.json . || true
+    - END_EPOCH=$(date +%s)
+    - DURATION=$((END_EPOCH - STAGE_START_EPOCH))
+    - |
+      python3 << 'PYEOF'
+      import json
+
+      d = json.load(open('semgrep-report.json'))
+      results = d.get('results', [])
+      errors   = [r for r in results if r.get('extra',{}).get('severity','') == 'ERROR']
+      warnings = [r for r in results if r.get('extra',{}).get('severity','') == 'WARNING']
+
+      print(f"\n{'='*60}")
+      print(f"  SAST — Semgrep Results")
+      print(f"{'='*60}")
+      print(f"  Total   : {len(results)}")
+      print(f"  Errors  : {len(errors)}")
+      print(f"  Warnings: {len(warnings)}")
+
+      if errors:
+          print(f"\n  ── ERROR findings ──")
+          for r in errors:
+              path = r.get('path','?')
+              line = r.get('start',{}).get('line','?')
+              rule = r.get('check_id','?').split('.')[-1]
+              msg  = r.get('extra',{}).get('message','')[:80]
+              print(f"  ❌ {path}:{line} [{rule}]")
+              print(f"     {msg}")
+
+      if warnings:
+          print(f"\n  ── WARNING findings (not blocking) ──")
+          for r in warnings:
+              path = r.get('path','?')
+              line = r.get('start',{}).get('line','?')
+              rule = r.get('check_id','?').split('.')[-1]
+              msg  = r.get('extra',{}).get('message','')[:80]
+              print(f"    {path}:{line} [{rule}]")
+              print(f"    {msg}")
+
+      print(f"{'='*60}\n")
+      PYEOF
+    - TOTAL=$(python3 -c "import json;d=json.load(open('semgrep-report.json'));r=d.get('results',[]);e=len([x for x in r if x.get('extra',{}).get('severity','')=='ERROR']);w=len([x for x in r if x.get('extra',{}).get('severity','')=='WARNING']);print(f'{len(r)}|{e}|{w}')" 2>/dev/null || echo "0|0|0")
+    - T=$(echo "$TOTAL" | cut -d'|' -f1)
+    - E=$(echo "$TOTAL" | cut -d'|' -f2)
+    - W=$(echo "$TOTAL" | cut -d'|' -f3)
+    - RISK=$((E * 10 + W * 3))
+    - |
+      if [ "${E}" -gt "${SAST_MAX_ERROR}" ]; then
+        GATE_PASSED="false"
+        echo "SAST BLOCKED: ${E} errors exceed threshold ${SAST_MAX_ERROR}"
+      else
+        GATE_PASSED="true"
+        echo "SAST PASSED: ${E} errors (threshold ${SAST_MAX_ERROR}), ${W} warnings"
+      fi
+    - TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    - "curl -s --max-time 5 -X POST \"${LOGSTASH_URL}\" -H 'Content-Type: application/json' -d \"{\\\"@timestamp\\\":\\\"${TS}\\\",\\\"event_type\\\":\\\"scan_result\\\",\\\"pipeline_id\\\":\\\"${CI_PIPELINE_ID}\\\",\\\"job_id\\\":\\\"${CI_JOB_ID}\\\",\\\"stage\\\":\\\"sast\\\",\\\"tool\\\":\\\"semgrep\\\",\\\"branch\\\":\\\"${CI_COMMIT_BRANCH}\\\",\\\"commit\\\":\\\"${CI_COMMIT_SHORT_SHA}\\\",\\\"project\\\":\\\"${CI_PROJECT_NAME}\\\",\\\"duration_seconds\\\":${DURATION},\\\"findings\\\":{\\\"total\\\":${T},\\\"error\\\":${E},\\\"warning\\\":${W}},\\\"threshold\\\":{\\\"max_error\\\":${SAST_MAX_ERROR}},\\\"risk_score\\\":${RISK},\\\"gate_passed\\\":${GATE_PASSED},\\\"message\\\":\\\"Semgrep SAST completed\\\"}\" || true"
+    - if [ "${GATE_PASSED}" = "false" ]; then exit 1; fi
+  artifacts:
+    when: always
+    paths:
+      - semgrep-report.json
+    expire_in: 30 days
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 2: SCA — Trivy filesystem
+# ─────────────────────────────────────────────────────────────────────────────
+sca-trivy:
+  stage: sca
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  before_script:
+    - apk add --no-cache curl bash python3
+  script:
+    - STAGE_START_EPOCH=$(date +%s)
+    - trivy fs . --severity HIGH,CRITICAL --pkg-types library --format json --output trivy-sca-report.json || true
+    - END_EPOCH=$(date +%s)
+    - DURATION=$((END_EPOCH - STAGE_START_EPOCH))
+    - |
+      python3 << 'PYEOF'
+      import json
+
+      d = json.load(open('trivy-sca-report.json'))
+      vulns = []
+      for r in d.get('Results', []):
+          for v in (r.get('Vulnerabilities') or []):
+              fixed = v.get('FixedVersion','') or ''
+              vulns.append({
+                  'pkg'    : v.get('PkgName','?'),
+                  'version': v.get('InstalledVersion','?'),
+                  'fixed'  : fixed or 'none',
+                  'sev'    : v.get('Severity','?'),
+                  'cve'    : v.get('VulnerabilityID','?'),
+                  'title'  : (v.get('Title') or v.get('Description',''))[:60],
+                  'has_fix': bool(fixed.strip()) and fixed.strip().lower() != 'none',
+              })
+
+      critical = [v for v in vulns if v['sev'] == 'CRITICAL']
+      high     = [v for v in vulns if v['sev'] == 'HIGH']
+
+      print(f"\n{'='*60}")
+      print(f"  SCA — Trivy Filesystem Results")
+      print(f"{'='*60}")
+      print(f"  Total    : {len(vulns)}")
+      print(f"  Critical : {len(critical)}")
+      print(f"  High     : {len(high)}")
+
+      if critical:
+          print(f"\n  ── CRITICAL CVEs ──")
+          for v in critical:
+              icon = '❌' if v['has_fix'] else ' '
+              print(f"  {icon} {v['cve']} | {v['pkg']}=={v['version']} → fix: {v['fixed']}")
+              print(f"     {v['title']}")
+
+      if high:
+          print(f"\n  ── HIGH CVEs ──")
+          for v in high:
+              icon = '' if v['has_fix'] else ''
+              print(f"  {icon} {v['cve']} | {v['pkg']}=={v['version']} → fix: {v['fixed']}")
+              print(f"     {v['title']}")
+
+      print(f"{'='*60}\n")
+      PYEOF
+    - STATS=$(python3 -c "import json;d=json.load(open('trivy-sca-report.json'));c=sum(1 for r in d.get('Results',[]) for v in (r.get('Vulnerabilities') or []) if v.get('Severity')=='CRITICAL');h=sum(1 for r in d.get('Results',[]) for v in (r.get('Vulnerabilities') or []) if v.get('Severity')=='HIGH');print(f'{c+h}|{c}|{h}')" 2>/dev/null || echo "0|0|0")
+    - T=$(echo "$STATS" | cut -d'|' -f1)
+    - C=$(echo "$STATS" | cut -d'|' -f2)
+    - H=$(echo "$STATS" | cut -d'|' -f3)
+    - RISK=$((C * 10 + H * 5))
+    - |
+      GATE_PASSED="true"
+      REASON=""
+      if [ "${C}" -gt "${SCA_MAX_CRITICAL}" ]; then
+        GATE_PASSED="false"
+        REASON="critical=${C} exceed threshold ${SCA_MAX_CRITICAL}"
+      fi
+      if [ "${H}" -gt "${SCA_MAX_HIGH}" ]; then
+        GATE_PASSED="false"
+        REASON="${REASON} high=${H} exceed threshold ${SCA_MAX_HIGH}"
+      fi
+      if [ "${GATE_PASSED}" = "false" ]; then
+        echo "SCA BLOCKED: ${REASON}"
+      else
+        echo "SCA PASSED: critical=${C} high=${H}"
+      fi
+    - TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    - "curl -s --max-time 5 -X POST \"${LOGSTASH_URL}\" -H 'Content-Type: application/json' -d \"{\\\"@timestamp\\\":\\\"${TS}\\\",\\\"event_type\\\":\\\"scan_result\\\",\\\"pipeline_id\\\":\\\"${CI_PIPELINE_ID}\\\",\\\"job_id\\\":\\\"${CI_JOB_ID}\\\",\\\"stage\\\":\\\"sca\\\",\\\"tool\\\":\\\"trivy-fs\\\",\\\"branch\\\":\\\"${CI_COMMIT_BRANCH}\\\",\\\"commit\\\":\\\"${CI_COMMIT_SHORT_SHA}\\\",\\\"project\\\":\\\"${CI_PROJECT_NAME}\\\",\\\"duration_seconds\\\":${DURATION},\\\"findings\\\":{\\\"total\\\":${T},\\\"critical\\\":${C},\\\"high\\\":${H}},\\\"threshold\\\":{\\\"max_critical\\\":${SCA_MAX_CRITICAL},\\\"max_high\\\":${SCA_MAX_HIGH}},\\\"risk_score\\\":${RISK},\\\"gate_passed\\\":${GATE_PASSED},\\\"message\\\":\\\"Trivy SCA completed\\\"}\" || true"
+    - if [ "${GATE_PASSED}" = "false" ]; then exit 1; fi
+  artifacts:
+    when: always
+    paths:
+      - trivy-sca-report.json
+    expire_in: 30 days
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 3: BUILD Docker image
+# ─────────────────────────────────────────────────────────────────────────────
+build-image:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  variables:
+    DOCKER_TLS_CERTDIR: ""
+    IMAGE_LOCAL_TAG: "$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA"
+  before_script:
+    - apk add --no-cache curl
+  script:
+    - STAGE_START_EPOCH=$(date +%s)
+    - docker build -t $IMAGE_LOCAL_TAG .
+    - docker save $IMAGE_LOCAL_TAG > image.tar
+    - END_EPOCH=$(date +%s)
+    - DURATION=$((END_EPOCH - STAGE_START_EPOCH))
+    - IMAGE_SIZE=$(du -sb image.tar | cut -f1)
+    - TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    - "curl -s --max-time 5 -X POST \"${LOGSTASH_URL}\" -H 'Content-Type: application/json' -d \"{\\\"@timestamp\\\":\\\"${TS}\\\",\\\"event_type\\\":\\\"build_result\\\",\\\"pipeline_id\\\":\\\"${CI_PIPELINE_ID}\\\",\\\"job_id\\\":\\\"${CI_JOB_ID}\\\",\\\"stage\\\":\\\"build\\\",\\\"tool\\\":\\\"docker\\\",\\\"branch\\\":\\\"${CI_COMMIT_BRANCH}\\\",\\\"commit\\\":\\\"${CI_COMMIT_SHORT_SHA}\\\",\\\"project\\\":\\\"${CI_PROJECT_NAME}\\\",\\\"duration_seconds\\\":${DURATION},\\\"image\\\":{\\\"tag\\\":\\\"${IMAGE_LOCAL_TAG}\\\",\\\"size_bytes\\\":${IMAGE_SIZE}},\\\"gate_passed\\\":true,\\\"message\\\":\\\"Docker image built\\\"}\" || true"
+  artifacts:
+    paths:
+      - image.tar
+    expire_in: 1 hour
+  rules:
+    - exists:
+        - Dockerfile
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 4: CONTAINER SCAN — Trivy image (smart gate: only block fixable CVEs)
+# ─────────────────────────────────────────────────────────────────────────────
+container-scan:
+  stage: container-scan
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  before_script:
+    - apk add --no-cache curl bash python3
+  script:
+    - STAGE_START_EPOCH=$(date +%s)
+    - trivy image --input image.tar --severity HIGH,CRITICAL --pkg-types os --format json --output trivy-image-report.json || true
+    - END_EPOCH=$(date +%s)
+    - DURATION=$((END_EPOCH - STAGE_START_EPOCH))
+    - |
+      python3 << 'PYEOF'
+      import json
+
+      d = json.load(open('trivy-image-report.json'))
+      vulns = []
+      for r in d.get('Results', []):
+          layer = r.get('Type','?')
+          for v in (r.get('Vulnerabilities') or []):
+              fixed = v.get('FixedVersion','') or ''
+              has_fix = bool(fixed.strip()) and fixed.strip().lower() != 'none'
+              vulns.append({
+                  'pkg'    : v.get('PkgName','?'),
+                  'version': v.get('InstalledVersion','?'),
+                  'fixed'  : fixed or 'none',
+                  'sev'    : v.get('Severity','?'),
+                  'cve'    : v.get('VulnerabilityID','?'),
+                  'title'  : (v.get('Title') or '')[:60],
+                  'layer'  : layer,
+                  'has_fix': has_fix,
+              })
+
+      critical    = [v for v in vulns if v['sev'] == 'CRITICAL']
+      high        = [v for v in vulns if v['sev'] == 'HIGH']
+      fixable_c   = [v for v in critical if v['has_fix']]
+      fixable_h   = [v for v in high     if v['has_fix']]
+      unfixable   = [v for v in vulns    if not v['has_fix']]
+
+      print(f"\n{'='*60}")
+      print(f"  Container Scan — Trivy Image Results")
+      print(f"{'='*60}")
+      print(f"  Total          : {len(vulns)}")
+      print(f"  Critical       : {len(critical)}")
+      print(f"  High           : {len(high)}")
+      print(f"  ├─ Fixable     : {len(fixable_c)+len(fixable_h)}  ← blocks pipeline")
+      print(f"  └─ No patch yet: {len(unfixable)}  ← accepted, vendor pending")
+
+      if fixable_c or fixable_h:
+          print(f"\n  ── FIXABLE CVEs — must fix before deploy ──")
+          for v in fixable_c + fixable_h:
+              icon = 'X' if v['sev'] == 'CRITICAL' else ' '
+              print(f"  {icon} {v['cve']} | {v['pkg']}=={v['version']} → fix: {v['fixed']}")
+              print(f"     {v['title']}")
+
+      if unfixable:
+          print(f"\n  ── No patch available — accepted risk ──")
+          shown = unfixable[:10]
+          for v in shown:
+              print(f"    {v['cve']} | {v['pkg']}=={v['version']} [no fix]")
+          if len(unfixable) > 10:
+              print(f"  ... and {len(unfixable)-10} more with no patch")
+
+      print(f"{'='*60}\n")
+
+      with open('/tmp/scan_counts.txt', 'w') as f:
+          f.write(f"{len(fixable_c)}|{len(fixable_h)}|{len(critical)}|{len(high)}")
+      PYEOF
+    - STATS=$(cat /tmp/scan_counts.txt 2>/dev/null || echo "0|0|0|0")
+    - FC=$(echo "$STATS" | cut -d'|' -f1)
+    - FH=$(echo "$STATS" | cut -d'|' -f2)
+    - C=$(echo "$STATS" | cut -d'|' -f3)
+    - H=$(echo "$STATS" | cut -d'|' -f4)
+    - RISK=$((FC * 10 + FH * 5))
+    - |
+      GATE_PASSED="true"
+      REASON=""
+      if [ "${FC}" -gt "${IMAGE_MAX_CRITICAL}" ]; then
+        GATE_PASSED="false"
+        REASON="fixable critical=${FC} exceed threshold ${IMAGE_MAX_CRITICAL}"
+      fi
+      if [ "${FH}" -gt "${IMAGE_MAX_HIGH}" ]; then
+        GATE_PASSED="false"
+        REASON="${REASON} fixable high=${FH} exceed threshold ${IMAGE_MAX_HIGH}"
+      fi
+      if [ "${GATE_PASSED}" = "false" ]; then
+        echo "CONTAINER SCAN BLOCKED: ${REASON}"
+      else
+        echo "CONTAINER SCAN PASSED"
+        echo "  Total CVE: critical=${C} high=${H}"
+        echo "  Fixable  : critical=${FC} high=${FH} (these block pipeline)"
+        echo "  No patch : $((C - FC)) critical + $((H - FH)) high (vendor pending)"
+      fi
+    - TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    - "curl -s --max-time 5 -X POST \"${LOGSTASH_URL}\" -H 'Content-Type: application/json' -d \"{\\\"@timestamp\\\":\\\"${TS}\\\",\\\"event_type\\\":\\\"scan_result\\\",\\\"pipeline_id\\\":\\\"${CI_PIPELINE_ID}\\\",\\\"job_id\\\":\\\"${CI_JOB_ID}\\\",\\\"stage\\\":\\\"container-scan\\\",\\\"tool\\\":\\\"trivy-image\\\",\\\"branch\\\":\\\"${CI_COMMIT_BRANCH}\\\",\\\"commit\\\":\\\"${CI_COMMIT_SHORT_SHA}\\\",\\\"project\\\":\\\"${CI_PROJECT_NAME}\\\",\\\"duration_seconds\\\":${DURATION},\\\"findings\\\":{\\\"total_critical\\\":${C},\\\"total_high\\\":${H},\\\"fixable_critical\\\":${FC},\\\"fixable_high\\\":${FH}},\\\"threshold\\\":{\\\"max_critical\\\":${IMAGE_MAX_CRITICAL},\\\"max_high\\\":${IMAGE_MAX_HIGH}},\\\"risk_score\\\":${RISK},\\\"gate_passed\\\":${GATE_PASSED},\\\"message\\\":\\\"Trivy image scan completed\\\"}\" || true"
+    - if [ "${GATE_PASSED}" = "false" ]; then exit 1; fi
+  artifacts:
+    when: always
+    paths:
+      - trivy-image-report.json
+    expire_in: 30 days
+  needs:
+    - build-image
+  rules:
+    - exists:
+        - Dockerfile
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 5: GATE — Summary
+# ─────────────────────────────────────────────────────────────────────────────
+security-gate:
+  stage: gate
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl python3
+  script:
+    - SUMMARY=$(python3 -c "import json,os;sg=json.load(open('semgrep-report.json')) if os.path.exists('semgrep-report.json') else {};fs=json.load(open('trivy-sca-report.json')) if os.path.exists('trivy-sca-report.json') else {};img=json.load(open('trivy-image-report.json')) if os.path.exists('trivy-image-report.json') else {};se=len([r for r in sg.get('results',[]) if r.get('extra',{}).get('severity','')=='ERROR']);sw=len([r for r in sg.get('results',[]) if r.get('extra',{}).get('severity','')=='WARNING']);fc=sum(1 for r in fs.get('Results',[]) for v in (r.get('Vulnerabilities') or []) if v.get('Severity')=='CRITICAL');fh=sum(1 for r in fs.get('Results',[]) for v in (r.get('Vulnerabilities') or []) if v.get('Severity')=='HIGH');ic=sum(1 for r in img.get('Results',[]) for v in (r.get('Vulnerabilities') or []) if v.get('Severity')=='CRITICAL');ih=sum(1 for r in img.get('Results',[]) for v in (r.get('Vulnerabilities') or []) if v.get('Severity')=='HIGH');risk=se*10+sw*3+fc*10+fh*5+ic*10+ih*5;level='critical' if risk>=50 else 'high' if risk>=20 else 'medium' if risk>=5 else 'low';print(f'{se}|{sw}|{fc}|{fh}|{ic}|{ih}|{risk}|{level}')" 2>/dev/null || echo "0|0|0|0|0|0|0|unknown")
+    - SG_E=$(echo "$SUMMARY" | cut -d'|' -f1)
+    - SG_W=$(echo "$SUMMARY" | cut -d'|' -f2)
+    - FS_C=$(echo "$SUMMARY" | cut -d'|' -f3)
+    - FS_H=$(echo "$SUMMARY" | cut -d'|' -f4)
+    - IM_C=$(echo "$SUMMARY" | cut -d'|' -f5)
+    - IM_H=$(echo "$SUMMARY" | cut -d'|' -f6)
+    - RISK=$(echo "$SUMMARY" | cut -d'|' -f7)
+    - LEVEL=$(echo "$SUMMARY" | cut -d'|' -f8)
+    - TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    - "curl -s --max-time 5 -X POST \"${LOGSTASH_URL}\" -H 'Content-Type: application/json' -d \"{\\\"@timestamp\\\":\\\"${TS}\\\",\\\"event_type\\\":\\\"pipeline_summary\\\",\\\"pipeline_id\\\":\\\"${CI_PIPELINE_ID}\\\",\\\"job_id\\\":\\\"${CI_JOB_ID}\\\",\\\"stage\\\":\\\"gate\\\",\\\"branch\\\":\\\"${CI_COMMIT_BRANCH}\\\",\\\"commit\\\":\\\"${CI_COMMIT_SHORT_SHA}\\\",\\\"project\\\":\\\"${CI_PROJECT_NAME}\\\",\\\"summary\\\":{\\\"sast\\\":{\\\"error\\\":${SG_E},\\\"warning\\\":${SG_W}},\\\"sca\\\":{\\\"critical\\\":${FS_C},\\\"high\\\":${FS_H}},\\\"container\\\":{\\\"critical\\\":${IM_C},\\\"high\\\":${IM_H}}},\\\"thresholds\\\":{\\\"sast_max_error\\\":${SAST_MAX_ERROR},\\\"sca_max_critical\\\":${SCA_MAX_CRITICAL},\\\"sca_max_high\\\":${SCA_MAX_HIGH},\\\"image_max_critical\\\":${IMAGE_MAX_CRITICAL},\\\"image_max_high\\\":${IMAGE_MAX_HIGH}},\\\"risk_score\\\":${RISK},\\\"risk_level\\\":\\\"${LEVEL}\\\",\\\"message\\\":\\\"Security gate completed\\\"}\" || true"
+    - echo "=== Security Gate ==="
+    - echo "SAST      error=${SG_E}/${SAST_MAX_ERROR} warning=${SG_W}"
+    - echo "SCA       critical=${FS_C}/${SCA_MAX_CRITICAL} high=${FS_H}/${SCA_MAX_HIGH}"
+    - echo "Container critical=${IM_C}/${IMAGE_MAX_CRITICAL} high=${IM_H}/${IMAGE_MAX_HIGH}"
+    - echo "Risk      ${RISK} (${LEVEL})"
+  needs:
+    - sast-semgrep
+    - sca-trivy
+    - container-scan
+  artifacts:
+    when: always
+    paths:
+      - semgrep-report.json
+      - trivy-sca-report.json
+      - trivy-image-report.json
+    expire_in: 90 days
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 6: PUSH ECR
+# ─────────────────────────────────────────────────────────────────────────────
+push-ecr:
+  stage: push-ecr
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - apk add --no-cache curl aws-cli bash
+  script:
+    - |
+      BRANCH="${CI_COMMIT_BRANCH}"
+      PREFIX=$(echo "${BRANCH}" | tr '[:lower:]' '[:upper:]' | tr '-' '_')
+
+      AWS_KEY=$(eval echo "\${${PREFIX}_AWS_ACCESS_KEY_ID}")
+      AWS_SEC=$(eval echo "\${${PREFIX}_AWS_SECRET_ACCESS_KEY}")
+      TARGET_ECR=$(eval echo "\${${PREFIX}_ECR}")
+
+      if [ -z "${AWS_KEY}" ] || [ -z "${TARGET_ECR}" ]; then
+        echo "ERROR: No variable found for branch ${BRANCH}"
+        echo "Need: ${PREFIX}_AWS_ACCESS_KEY_ID, ${PREFIX}_AWS_SECRET_ACCESS_KEY, ${PREFIX}_ECR"
+        exit 1
+      fi
+
+      export AWS_ACCESS_KEY_ID="${AWS_KEY}"
+      export AWS_SECRET_ACCESS_KEY="${AWS_SEC}"
+      APP_NAME="${BRANCH}"
+
+      echo "=== Branch: ${BRANCH} | ECR: ${TARGET_ECR} ==="
+
+      STAGE_START_EPOCH=$(date +%s)
+      ECR_REGISTRY=$(echo "${TARGET_ECR}" | cut -d'/' -f1)
+      ECR_IMAGE="${TARGET_ECR}:${CI_COMMIT_SHORT_SHA}"
+      ECR_IMAGE_LATEST="${TARGET_ECR}:latest"
+      IMAGE_LOCAL_TAG="${CI_PROJECT_NAME}:${CI_COMMIT_SHORT_SHA}"
+
+      aws ecr get-login-password --region ${AWS_REGION} \
+        | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+      docker load -i image.tar
+      docker tag ${IMAGE_LOCAL_TAG} ${ECR_IMAGE}
+      docker tag ${IMAGE_LOCAL_TAG} ${ECR_IMAGE_LATEST}
+      docker push ${ECR_IMAGE}
+      docker push ${ECR_IMAGE_LATEST}
+
+      END_EPOCH=$(date +%s)
+      DURATION=$((END_EPOCH - STAGE_START_EPOCH))
+      TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+      curl -s --max-time 5 -X POST "${LOGSTASH_URL}" \
+        -H 'Content-Type: application/json' \
+        -d "{\"@timestamp\":\"${TS}\",\"event_type\":\"ecr_push\",\"pipeline_id\":\"${CI_PIPELINE_ID}\",\"job_id\":\"${CI_JOB_ID}\",\"stage\":\"push-ecr\",\"branch\":\"${BRANCH}\",\"commit\":\"${CI_COMMIT_SHORT_SHA}\",\"project\":\"${CI_PROJECT_NAME}\",\"app\":\"${APP_NAME}\",\"duration_seconds\":${DURATION},\"image\":\"${ECR_IMAGE}\",\"gate_passed\":true,\"message\":\"Image pushed to ECR\"}" || true
+
+      echo "Pushed: ${ECR_IMAGE}"
+  needs:
+    - job: security-gate
+    - job: build-image
+      artifacts: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^dev\d+$/'
+      exists:
+        - Dockerfile

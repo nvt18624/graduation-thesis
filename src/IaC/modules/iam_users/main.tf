@@ -5,7 +5,7 @@ resource "aws_ecr_repository" "apps" {
   for_each = var.apps
 
   name                 = "${var.prefix}-${each.key}"
-  image_tag_mutability = "IMMUTABLE"
+  image_tag_mutability = "MUTABLE"
   force_delete         = true
 
   image_scanning_configuration {
@@ -477,6 +477,7 @@ resource "aws_cloudwatch_event_rule" "ecr_push" {
       action-type     = ["PUSH"]
       result          = ["SUCCESS"]
       repository-name = ["${var.prefix}-${each.key}"]
+      image-tag       = [{ prefix = "sha-" }]
     }
   })
 

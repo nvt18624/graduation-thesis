@@ -150,6 +150,21 @@ resource "null_resource" "copy_logstash_script" {
   depends_on = [module.logstash, module.bastion]
 }
 
+# ── Anomaly Detection: Inference Lambda + EventBridge Schedule ────────────────
+module "anomaly_detection" {
+  source = "./modules/anomaly_detection/"
+
+  prefix              = var.network_name
+  s3_bucket           = "zt-devsecops-logs"
+  rollback_lambda_arn = module.iam_users.rollback_lambda_arn
+  sklearn_layer_arn   = var.sklearn_layer_arn
+  window_minutes      = var.anomaly_window_minutes
+  apps                = keys(var.apps)
+  alert_email         = var.alert_email
+
+  depends_on = [module.iam_users]
+}
+
 //// Private App subnet (10.0.2.0/24) – app EC2s are created/destroyed on demand
 //// by dev users via iam_users module permissions (ECR push + SSM deploy).
 //// No static instances defined here; use module "instance" ad-hoc per app.

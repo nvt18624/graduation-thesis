@@ -32,6 +32,11 @@ apps = {
   app2 = { app_port = 5000 }
 }
 
+# ── Anomaly Detection ─────────────────────────────────────────────────────────
+sklearn_layer_arn      = "arn:aws:lambda:ap-southeast-1:196035801721:layer:sklearn-numpy:1"
+anomaly_window_minutes = 60
+alert_email            = "thiennguyen01052004@gmail.com"
+
 # ── Dev users (least privilege – can only deploy to assigned apps) ────────────
 dev_users = {
   dev1 = { allowed_apps = ["app1"] }

@@ -3,3 +3,5 @@
 crash.log
 crash.*.log
 .terraform/
+__pycache__/
+venv/
