@@ -34,6 +34,7 @@ APPS             = os.environ.get("APPS", "app2").split(",")  # comma-separated
 s3_client     = boto3.client("s3",     region_name=AWS_REGION)
 lambda_client = boto3.client("lambda", region_name=AWS_REGION)
 sns_client    = boto3.client("sns",    region_name=AWS_REGION)
+ssm_client    = boto3.client("ssm",    region_name=AWS_REGION)
 
 # Cache model in Lambda execution context (warm start)
 _model_cache = {}
@@ -239,6 +240,28 @@ def trigger_rollback(app: str):
     print(f"Rollback triggered for app={app}, status={response['StatusCode']}")
 
 
+def promote_to_stable(app: str):
+    """Promote pending-tag → stable-tag khi không có anomaly."""
+    try:
+        pending = ssm_client.get_parameter(
+            Name=f"/{PREFIX}/{app}/pending-tag"
+        )["Parameter"]["Value"]
+
+        if pending == "none":
+            print(f"[{app}] No pending tag, skipping promote")
+            return
+
+        ssm_client.put_parameter(
+            Name=f"/{PREFIX}/{app}/stable-tag",
+            Value=pending,
+            Type="String",
+            Overwrite=True,
+        )
+        print(f"[{app}] Promoted: pending={pending} → stable")
+    except Exception as e:
+        print(f"[{app}] Promote failed: {e}")
+
+
 # ── Handler ───────────────────────────────────────────────────────────────────
 
 def handler(event, context):
@@ -271,12 +294,15 @@ def handler(event, context):
     result = score_features(features, model, scaler, threshold)
     print(f"Score: {result['score']:.4f} (threshold={threshold:.4f}) → {'ANOMALY' if result['is_anomaly'] else 'normal'}")
 
-    # 5. Action if anomaly
+    # 5. Action based on result
     if result["is_anomaly"]:
         print("ANOMALY DETECTED!")
         send_alert(result, window_start, window_end)
         for app in APPS:
             trigger_rollback(app.strip())
+    else:
+        for app in APPS:
+            promote_to_stable(app.strip())
 
     return {
         "statusCode": 200,

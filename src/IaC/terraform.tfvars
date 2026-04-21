@@ -17,7 +17,7 @@ private_data_subnet_az   = "ap-southeast-1a"
 # ── Security ──────────────────────────────────────────────────────────────────
 # Replace with your actual admin IP (e.g. "203.0.113.10/32")
 
-admin_cidr_blocks = ["171.241.24.204/32"]
+admin_cidr_blocks = ["171.241.19.36/32"]
 
 # Replace with your on-premise network CIDR(s) that ship logs
 onpremise_cidr_blocks = ["118.70.57.134/32"]

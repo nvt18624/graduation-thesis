@@ -3,7 +3,7 @@ Feature extraction từ Windows auth logs (event_id 4624) trên S3.
 Aggregate theo window_minutes → tạo feature vector cho training.
 
 window_minutes: kích thước time window (mặc định 60 phút)
-  - 1   → theo phút (rất chi tiết, cần nhiều data)
+  - 1   → theo phút 
   - 15  → theo 15 phút
   - 60  → theo giờ (mặc định)
   - 1440 → theo ngày
@@ -24,8 +24,8 @@ AWS_REGION = "ap-southeast-1"
 
 def _bucket_key(ts: datetime, window_minutes: int) -> str:
     """
-    Tạo key cho time bucket dựa trên window_minutes.
-    Ví dụ window_minutes=15: "2026-01-07 08:15"
+    Create key for time bucket base on window_minutes.
+    For example window_minutes=15: "2026-01-07 08:15"
          window_minutes=60: "2026-01-07 08"
          window_minutes=1:  "2026-01-07 08:07"
     """
@@ -41,7 +41,7 @@ def _bucket_key(ts: datetime, window_minutes: int) -> str:
 
 
 def _parse_key(key: str, window_minutes: int) -> datetime:
-    """Parse bucket key ngược lại thành datetime."""
+    """Parse bucket key reverse to datetime."""
     if window_minutes >= 60:
         return datetime.strptime(key, "%Y-%m-%d %H")
     else:
@@ -49,7 +49,7 @@ def _parse_key(key: str, window_minutes: int) -> datetime:
 
 
 def list_all_files(s3_client, months: list[str]) -> list[str]:
-    """List tất cả .txt.gz files trong các tháng chỉ định."""
+    """List all .txt.gz files in intend month."""
     keys = []
     for month in months:
         paginator = s3_client.get_paginator("list_objects_v2")
@@ -66,7 +66,7 @@ def list_all_files(s3_client, months: list[str]) -> list[str]:
 
 
 def read_gz_file(s3_client, key: str) -> list[dict]:
-    """Download và parse 1 file .txt.gz từ S3."""
+    """Download and parse 1 file .txt.gz from S3."""
     response = s3_client.get_object(Bucket=S3_BUCKET, Key=key)
     compressed = response["Body"].read()
     with gzip.open(io.BytesIO(compressed), "rt", encoding="utf-8") as f:
@@ -95,8 +95,8 @@ def _empty_bucket() -> dict:
 
 def extract_features_from_records(records: list[dict], window_minutes: int = 60) -> dict:
     """
-    Aggregate records theo time window → feature buckets.
-    Key format phụ thuộc vào window_minutes.
+    Aggregate records follow as time window → feature buckets.
+    Key format base on window_minutes.
     """
     buckets = defaultdict(_empty_bucket)
 
@@ -144,7 +144,7 @@ def extract_features_from_records(records: list[dict], window_minutes: int = 60)
 
 
 def build_feature_dataframe(buckets: dict, window_minutes: int = 60) -> pd.DataFrame:
-    """Chuyển buckets thành DataFrame với numeric features."""
+    """Tranform buckets to DataFrame with numeric features."""
     rows = []
     for key, b in sorted(buckets.items()):
         total = b["login_count"]

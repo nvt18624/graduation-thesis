@@ -281,7 +281,7 @@ resource "aws_ssm_parameter" "app_port" {
   tags = { App = each.key, ManagedBy = "terraform" }
 }
 
-# Stable-tag placeholder – overwritten by EventBridge pipeline after each successful deploy
+# Stable-tag – promoted by inference Lambda after 1 window of clean monitoring
 resource "aws_ssm_parameter" "app_stable_tag" {
   for_each = var.apps
 
@@ -290,25 +290,40 @@ resource "aws_ssm_parameter" "app_stable_tag" {
   value = "none"
 
   lifecycle {
-    ignore_changes = [value] # Terraform no overwrite after the first deployment
+    ignore_changes = [value]
   }
 
   tags = { App = each.key, ManagedBy = "terraform" }
 }
 
-# App EC2 need to  stable-tag after deploy successful
+# Pending-tag – written immediately after deploy, before anomaly check
+resource "aws_ssm_parameter" "app_pending_tag" {
+  for_each = var.apps
+
+  name  = "/${var.prefix}/${each.key}/pending-tag"
+  type  = "String"
+  value = "none"
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+
+  tags = { App = each.key, ManagedBy = "terraform" }
+}
+
+# App EC2 writes pending-tag after deploy; inference Lambda promotes to stable-tag
 resource "aws_iam_policy" "app_ssm_stable_tag" {
   name        = "${var.prefix}-app-ssm-stable-tag"
-  description = "Allow app EC2 to write stable-tag to SSM Parameter Store after deploy"
+  description = "Allow app EC2 to write pending-tag to SSM Parameter Store after deploy"
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Sid    = "SSMPutStableTag"
+      Sid    = "SSMPutPendingTag"
       Effect = "Allow"
       Action = ["ssm:PutParameter"]
       Resource = [
-        "arn:aws:ssm:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:parameter/${var.prefix}/*/stable-tag"
+        "arn:aws:ssm:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:parameter/${var.prefix}/*/pending-tag"
       ]
     }]
   })
@@ -514,7 +529,7 @@ resource "aws_cloudwatch_event_target" "ssm_deploy" {
         "docker stop ${each.key} 2>/dev/null || true",
         "docker rm ${each.key} 2>/dev/null || true",
         "docker run -d --name ${each.key} --restart unless-stopped -p ${each.value.app_port}:${each.value.app_port} $IMAGE",
-        "aws ssm put-parameter --name \"/${var.prefix}/${each.key}/stable-tag\" --value \"<image_tag>\" --type String --overwrite",
+        "aws ssm put-parameter --name \"/${var.prefix}/${each.key}/pending-tag\" --value \"<image_tag>\" --type String --overwrite",
         "echo Deploy ${each.key}:<image_tag> done"
       ]
     }
