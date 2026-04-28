@@ -70,8 +70,8 @@ sast-semgrep:
               line = r.get('start',{}).get('line','?')
               rule = r.get('check_id','?').split('.')[-1]
               msg  = r.get('extra',{}).get('message','')[:80]
-              print(f"    {path}:{line} [{rule}]")
-              print(f"    {msg}")
+              print(f"  ⚠️  {path}:{line} [{rule}]")
+              print(f"     {msg}")
 
       print(f"{'='*60}\n")
       PYEOF
@@ -145,14 +145,14 @@ sca-trivy:
       if critical:
           print(f"\n  ── CRITICAL CVEs ──")
           for v in critical:
-              icon = '❌' if v['has_fix'] else ' '
+              icon = '❌' if v['has_fix'] else 'ℹ️ '
               print(f"  {icon} {v['cve']} | {v['pkg']}=={v['version']} → fix: {v['fixed']}")
               print(f"     {v['title']}")
 
       if high:
           print(f"\n  ── HIGH CVEs ──")
           for v in high:
-              icon = '' if v['has_fix'] else ''
+              icon = '⚠️ ' if v['has_fix'] else 'ℹ️ '
               print(f"  {icon} {v['cve']} | {v['pkg']}=={v['version']} → fix: {v['fixed']}")
               print(f"     {v['title']}")
 
@@ -403,8 +403,7 @@ push-ecr:
 
       STAGE_START_EPOCH=$(date +%s)
       ECR_REGISTRY=$(echo "${TARGET_ECR}" | cut -d'/' -f1)
-      ECR_IMAGE="${TARGET_ECR}:${CI_COMMIT_SHORT_SHA}"
-      ECR_IMAGE_LATEST="${TARGET_ECR}:latest"
+      ECR_IMAGE="${TARGET_ECR}:sha-${CI_COMMIT_SHORT_SHA}"
       IMAGE_LOCAL_TAG="${CI_PROJECT_NAME}:${CI_COMMIT_SHORT_SHA}"
 
       aws ecr get-login-password --region ${AWS_REGION} \
@@ -412,9 +411,8 @@ push-ecr:
 
       docker load -i image.tar
       docker tag ${IMAGE_LOCAL_TAG} ${ECR_IMAGE}
-      docker tag ${IMAGE_LOCAL_TAG} ${ECR_IMAGE_LATEST}
       docker push ${ECR_IMAGE}
-      docker push ${ECR_IMAGE_LATEST}
+     
 
       END_EPOCH=$(date +%s)
       DURATION=$((END_EPOCH - STAGE_START_EPOCH))

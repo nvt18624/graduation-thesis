@@ -1,36 +1,43 @@
 #!/bin/bash
 set -e
 # =================================================
-# SEMGREP QUALITY GATE - PRE-RECEIVE HOOK
-# Scan TẤT CẢ commits trong mỗi push
-# SCAN: Secret Detection + Code Smell
-# =================================================
+
 # ================= ENV ==========================
 export PATH="/usr/local/bin:/opt/semgrep-venv/bin:/usr/bin:/bin:$PATH"
 export HOME="/var/opt/gitlab"
 export SEMGREP_SETTINGS_FILE="/var/opt/gitlab/.semgrep/settings.yml"
 export SEMGREP_SEND_METRICS=off
+
 # ================= CONFIG =======================
 LOG_DIR="/var/log/gitlab/semgrep"
 LOG_FILE="${LOG_DIR}/gate.log"
 TEMP_BASE="/tmp/semgrep-scans"
-STRICT_BRANCHES=("main" "master" "developer" "production")
+STRICT_BRANCHES=("main" "master" "developer" "production" "dev1" "dev2")
 WARN_ONLY_BRANCHES=("feature")
-LOGSTASH_URL="${LOGSTASH_URL:-http://your-logstash-host:5044}"
+export LOGSTASH_URL="${LOGSTASH_URL:-http://52.221.228.172:8080}"
+
+# ================= BRANCH OWNERS ================
+declare -A BRANCH_OWNERS=(
+  ["dev1"]="dev1"
+  ["dev2"]="dev2"
+)
 # =================================================
+
 mkdir -p "$LOG_DIR"
 mkdir -p "$TEMP_BASE"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
+
 log() {
   echo "[$(date '+%F %T')] [$GL_PROJECT_PATH] [$GL_USERNAME] $1" | tee -a "$LOG_FILE"
 }
 
 # ===============================================
-# Function: push log to Logstash 
+# Function: push log lên Logstash — dont block hook if fail
 # ===============================================
 send_log() {
   local PAYLOAD="$1"
@@ -47,6 +54,7 @@ if ! command -v semgrep &> /dev/null; then
   echo -e "${RED}Semgrep not installed${NC}"
   exit 1
 fi
+
 log "============================================="
 log "Semgrep Quality Gate Started"
 log "Project: $GL_PROJECT_PATH | User: $GL_USERNAME"
@@ -61,33 +69,27 @@ scan_commit() {
   TEMP_DIR="${TEMP_BASE}/scan-${SCAN_ID}"
   mkdir -p "$TEMP_DIR"
   chmod 700 "$TEMP_DIR"
-
   SCAN_START=$(date +%s)
 
   # Extract code
   if ! git archive --format=tar "$COMMIT" | tar -xC "$TEMP_DIR" 2>> "$LOG_FILE"; then
     log "git archive failed for $COMMIT"
     rm -rf "$TEMP_DIR"
-
     send_log "{
       \"@timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
       \"event_type\":\"pre_receive_scan\",
       \"project\":\"${GL_PROJECT_PATH}\",
-      \"user\":\"${GL_USERNAME}\",
-      \"branch\":\"${BRANCH}\",
-      \"commit\":\"${COMMIT:0:8}\",
-      \"status\":\"error\",
       \"error\":\"git_archive_failed\",
       \"gate_passed\":false,
       \"message\":\"Pre-receive scan error\"
     }"
-
     echo "0"
     return
   fi
 
   SECRET_OUTPUT="${TEMP_DIR}/secrets.json"
   SMELL_OUTPUT="${TEMP_DIR}/smells.json"
+
   set +e
   semgrep scan \
     --config=p/secrets \
@@ -107,7 +109,7 @@ scan_commit() {
   SCAN_END=$(date +%s)
   SCAN_DURATION=$((SCAN_END - SCAN_START))
 
-  # Deduplicate và đếm
+  # Deduplicate and count
   SECRET_COUNT=$(python3 -c "
 import json
 try:
@@ -141,6 +143,7 @@ except: print(0)
   TOTAL=$((SECRET_COUNT + SMELL_COUNT))
   RISK=$((SECRET_COUNT * 10 + SMELL_COUNT * 3))
 
+  # Top rules policy  
   TOP_RULES=$(python3 -c "
 import json
 from collections import Counter
@@ -156,7 +159,7 @@ print(top if top else 'none')
 
   log "Commit=${COMMIT:0:8} secrets=$SECRET_COUNT smells=$SMELL_COUNT total=$TOTAL duration=${SCAN_DURATION}s"
 
-  # ─── Push log each commit to Logstash ───
+  # ─── push log every commit to Logstash ───
   send_log "{
     \"@timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
     \"event_type\":\"pre_receive_scan\",
@@ -177,7 +180,7 @@ print(top if top else 'none')
     \"message\":\"Pre-receive commit scan completed\"
   }"
 
-  # Return detail findings
+  # detail findings
   if [ "$SECRET_COUNT" -gt 0 ]; then
     echo ""
     echo -e "${RED} SECRET in commit ${COMMIT:0:8}: $SECRET_COUNT findings${NC}"
@@ -231,13 +234,50 @@ while read oldrev newrev refname; do
   PUSH_START=$(date +%s)
   log "Branch=$branch NewRev=$newrev OldRev=$oldrev"
 
+  # ─────────────────────────────────────
+  # Check branch ownership
+  # ─────────────────────────────────────
+  if [[ -n "${BRANCH_OWNERS[$branch]}" ]]; then
+    ALLOWED_USER="${BRANCH_OWNERS[$branch]}"
+    if [[ "$GL_USERNAME" != "$ALLOWED_USER" ]]; then
+      echo ""
+      echo -e "${RED}════════════════════════════════════════════════════${NC}"
+      echo -e "${RED} PUSH REJECTED — Branch ownership violation${NC}"
+      echo -e "${RED}════════════════════════════════════════════════════${NC}"
+      echo ""
+      echo "  Branch  : $branch"
+      echo "  You     : $GL_USERNAME"
+      echo "  Owner   : $ALLOWED_USER"
+      echo ""
+      echo "  Only [$ALLOWED_USER] just push to branch [$branch]!"
+      echo ""
+      log "REJECTED: $GL_USERNAME tried to push to $branch (owner: $ALLOWED_USER)"
+      send_log "{
+        \"@timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+        \"event_type\":\"pre_receive_ownership_violation\",
+        \"project\":\"${GL_PROJECT_PATH}\",
+        \"user\":\"${GL_USERNAME}\",
+        \"branch\":\"${branch}\",
+        \"allowed_user\":\"${ALLOWED_USER}\",
+        \"gate_passed\":false,
+        \"decision\":\"block\",
+        \"message\":\"Branch ownership violation\"
+      }"
+      exit 1
+    fi
+  fi
+
+  # ─────────────────────────────────────
   # Skip delete branch
+  # ─────────────────────────────────────
   if [[ "$newrev" == "0000000000000000000000000000000000000000" ]]; then
     log "Skip: branch deleted"
     continue
   fi
 
-  # Determine strict mode
+  # ─────────────────────────────────────
+  # Verify strict mode
+  # ─────────────────────────────────────
   STRICT_MODE=false
   for b in "${STRICT_BRANCHES[@]}"; do
     if [[ "$branch" == "$b" ]]; then
@@ -278,7 +318,7 @@ while read oldrev newrev refname; do
     RESULT=$(scan_commit "$COMMIT" "$branch")
     COMMIT_TOTAL=$(echo "$RESULT" | tail -1 | tr -d '[:space:]')
 
-    # Read again count from log
+    # take count to log
     LAST_LOG=$(grep "Commit=${COMMIT:0:8}" "$LOG_FILE" | tail -1)
     C_SEC=$(echo "$LAST_LOG" | grep -oP 'secrets=\K[0-9]+' || echo "0")
     C_SME=$(echo "$LAST_LOG" | grep -oP 'smells=\K[0-9]+' || echo "0")
@@ -297,7 +337,7 @@ while read oldrev newrev refname; do
   GRAND_RISK=$((GRAND_TOTAL_SECRETS * 10 + GRAND_TOTAL_SMELLS * 3))
 
   # ─────────────────────────────────────
-  # Final Decision + push log push summary
+  # Final Decision +  log push summary
   # ─────────────────────────────────────
   if $PUSH_BLOCKED; then
     if $STRICT_MODE; then
