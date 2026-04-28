@@ -605,7 +605,16 @@ The anomaly detection model is an **Isolation Forest** trained on Windows authen
 
 ```bash
 cd src/ml
+
+# Create and activate virtual environment
+python3 -m venv venv
+source venv/bin/activate          # Linux/macOS
+# venv\Scripts\activate           # Windows
+
+# Install dependencies
 pip install -r requirements.txt
+
+# Train and upload model to S3
 python train.py
 ```
 
