@@ -56,12 +56,12 @@
 <p align="center">
   <img src="references/architectures_new/zero_trust_delivery_pipeline_detail.png" alt="AI detection & rollback loop" width="70%" />
   <br/>
-  <em>Trust Foundation</em>
+  <em>Zero-Trust Delivery Pipeline</em>
 </p>
 <p align="center">
   <img src="references/architectures_new/AI_driven_detail.png" alt="AI detection & rollback loop" width="70%" />
   <br/>
-  <em>Trust Foundation</em>
+  <em>AI Detection and Rollback:</em>
 </p>
 ---
 
