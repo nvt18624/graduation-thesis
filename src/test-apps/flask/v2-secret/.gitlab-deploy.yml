@@ -1,0 +1,7 @@
+deploy-verify:
+  stage: deploy
+  image: alpine:latest
+  script:
+    - echo "This job should never run — push must be blocked by pre-receive hook (TC-04)"
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^dev\d+$/'

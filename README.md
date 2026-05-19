@@ -36,23 +36,33 @@
 </p>
 
 <p align="center">
-  <img src="references/architectures/zero-trust-flow.png" alt="Zero-trust pipeline flow" width="70%" />
+  <img src="references/architectures_new/devsecops_lifecycle_wt_3_layer_architecture.png" alt="Zero-trust pipeline flow" width="70%" />
   <br/>
-  <em>Zero-trust pipeline flow</em>
+  <em>Three-layer security architecture mapped onto the DevSecOps lifecycle.</em>
 </p>
 
 <p align="center">
-  <img src="references/architectures/aws.png" alt="AWS network design (production zero-trust cloud)" width="70%" />
+  <img src="references/architectures_new/devsecops_lifecycle_wt_3_layer_architecture.png" alt="AWS network design (production zero-trust cloud)" width="70%" />
   <br/>
-  <em>AWS network design — production zero-trust cloud</em>
+  <em>Structural view of the three-layer Zero-Trust CI/CD pipeline</em>
 </p>
 
 <p align="center">
-  <img src="references/architectures/AI.png" alt="AI detection & rollback loop" width="70%" />
+  <img src="references/architectures_new/trust_foundation_layer_detail.png" alt="AI detection & rollback loop" width="70%" />
   <br/>
-  <em>AI detection &amp; rollback loop</em>
+  <em>Trust Foundation</em>
 </p>
 
+<p align="center">
+  <img src="references/architectures_new/zero_trust_delivery_pipeline_detail.png" alt="AI detection & rollback loop" width="70%" />
+  <br/>
+  <em>Trust Foundation</em>
+</p>
+<p align="center">
+  <img src="references/architectures_new/AI_driven_detail.png" alt="AI detection & rollback loop" width="70%" />
+  <br/>
+  <em>Trust Foundation</em>
+</p>
 ---
 
 ## Prerequisites

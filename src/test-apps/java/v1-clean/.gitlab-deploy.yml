@@ -1,0 +1,11 @@
+deploy-verify:
+  stage: deploy
+  image: alpine:latest
+  script:
+    - echo "=== Deploy triggered by EventBridge on ECR push ==="
+    - echo "Branch  : $CI_COMMIT_BRANCH"
+    - echo "Commit  : $CI_COMMIT_SHORT_SHA"
+    - echo "Image   : sha-$CI_COMMIT_SHORT_SHA"
+    - echo "App     : java-v1-clean (TC-09 happy path)"
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^dev\d+$/'

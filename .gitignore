@@ -5,3 +5,6 @@ crash.*.log
 .terraform/
 __pycache__/
 venv/
+*.txt
+*.tex
+*.tf.swp
