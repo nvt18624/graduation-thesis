@@ -42,13 +42,13 @@
 </p>
 
 <p align="center">
-  <img src="references/architectures_new/devsecops_lifecycle_wt_3_layer_architecture.png" alt="AWS network design (production zero-trust cloud)" width="70%" />
+  <img src="references/architectures_new/three_layer_architecture_detail.png" alt="AWS network design (production zero-trust cloud)" width="70%" />
   <br/>
   <em>Structural view of the three-layer Zero-Trust CI/CD pipeline</em>
 </p>
 
 <p align="center">
-  <img src="references/architectures_new/three_layer_architecture_detail.png" alt="AI detection & rollback loop" width="70%" />
+  <img src="references/architectures_new/trust_foundation_layer_detail.png" alt="AI detection & rollback loop" width="70%" />
   <br/>
   <em>Trust Foundation</em>
 </p>
